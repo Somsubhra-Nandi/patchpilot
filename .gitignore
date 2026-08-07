@@ -1,0 +1,13 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.py[cod]
+*.sqlite3
+.next/
+node_modules/
+.pnpm-store/
+coverage/
+.codex-docx-render/
