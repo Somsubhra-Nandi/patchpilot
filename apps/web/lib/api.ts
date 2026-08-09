@@ -1,4 +1,4 @@
-import type { Channel, Repository, Task, TaskList } from "./types";
+import type { Channel, Decision, Repository, Task, TaskList } from "./types";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -19,6 +19,9 @@ export const api = {
   task: (id: string) => request<Task>(`/api/tasks/${id}`),
   repositories: () => request<Repository[]>("/api/repositories"),
   channels: () => request<Channel[]>("/api/channels"),
+  decisions: () => request<Decision[]>("/api/decisions?status=pending"),
+  resolveDecision: (id: string, option: string, note?: string) => request<Decision>(`/api/decisions/${id}/resolve`, { method: "POST", body: JSON.stringify({ option, actor: "Console maintainer", channel: "web", note }) }),
+  taskAction: (id: string, action: "pause" | "resume", note?: string) => request<Task>(`/api/tasks/${id}/${action}`, { method: "POST", body: JSON.stringify({ actor: "Console maintainer", channel: "web", note }) }),
   decide: (id: string, action: "approve" | "reject" | "cancel", note?: string) =>
     request<Task>(`/api/tasks/${id}/${action}`, {
       method: "POST",

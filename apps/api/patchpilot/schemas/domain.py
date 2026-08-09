@@ -116,12 +116,18 @@ class TaskRead(ORMModel):
     branch_name: str | None
     pull_request_url: str | None
     failure_reason: str | None
+    coding_agent_provider: str | None
+    external_session_id: str | None
+    agent_execution_status: str | None
+    last_checkpoint: dict[str, Any]
+    last_execution_at: datetime | None
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None
     repository: RepositoryRead
     events: list[TaskEventRead] = Field(default_factory=list)
     approvals: list[ApprovalRead] = Field(default_factory=list)
+    decisions: list["DecisionRead"] = Field(default_factory=list)
 
 
 class TaskList(BaseModel):
@@ -131,7 +137,37 @@ class TaskList(BaseModel):
     page_size: int
 
 
-class DecisionRequest(BaseModel):
+class HumanActionRequest(BaseModel):
+    actor: str = "maintainer"
+    channel: str = "web"
+    note: str | None = None
+
+
+# Backwards-compatible name for the original approval/cancel request payload.
+DecisionRequest = HumanActionRequest
+
+
+class DecisionRead(ORMModel):
+    id: uuid.UUID
+    task_id: uuid.UUID
+    decision_type: str
+    title: str
+    context: dict[str, Any]
+    risk_level: str
+    options: list[dict[str, Any]]
+    recommended_option: str | None
+    requested_by_agent: str
+    status: str
+    created_at: datetime
+    resolved_at: datetime | None
+    resolved_by: str | None
+    resolved_channel: str | None
+    resolution: str | None
+    resolution_note: str | None
+
+
+class DecisionResolve(BaseModel):
+    option: str
     actor: str = "maintainer"
     channel: str = "web"
     note: str | None = None
@@ -155,4 +191,3 @@ class InboundMessage(BaseModel):
     message_id: str
     connection_id: str
     text: str = Field(min_length=1)
-

@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from patchpilot.models import AgentTask, Approval, Repository, TaskEvent
+from patchpilot.models import AgentTask, Approval, DecisionRequest, Repository, TaskEvent
 
 
 class TaskRepository:
@@ -19,6 +19,7 @@ class TaskRepository:
                 selectinload(AgentTask.repository),
                 selectinload(AgentTask.events),
                 selectinload(AgentTask.approvals),
+                selectinload(AgentTask.decisions),
             )
             .execution_options(populate_existing=True)
         )
@@ -46,6 +47,7 @@ class TaskRepository:
                 selectinload(AgentTask.repository),
                 selectinload(AgentTask.events),
                 selectinload(AgentTask.approvals),
+                selectinload(AgentTask.decisions),
             )
             .order_by(AgentTask.created_at.desc())
             .offset((page - 1) * page_size)
@@ -83,6 +85,30 @@ class TaskRepository:
             .where(Approval.task_id == task_id, Approval.status == "pending")
             .order_by(Approval.created_at.desc())
         )
+
+
+class DecisionRepository:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def get(self, decision_id: uuid.UUID) -> DecisionRequest | None:
+        return self.db.scalar(select(DecisionRequest).where(DecisionRequest.id == decision_id).options(selectinload(DecisionRequest.task).selectinload(AgentTask.repository)))
+
+    def resolve_prefix(self, prefix: str) -> DecisionRequest | None:
+        matches = [item for item in self.db.scalars(select(DecisionRequest)).all() if str(item.id).startswith(prefix.lower())]
+        if len(matches) > 1:
+            raise ValueError(f"Decision prefix {prefix} is ambiguous")
+        return matches[0] if matches else None
+
+    def list(self, *, status: str | None = None, task_id: uuid.UUID | None = None, risk_level: str | None = None) -> Sequence[DecisionRequest]:
+        filters = []
+        if status:
+            filters.append(DecisionRequest.status == status)
+        if task_id:
+            filters.append(DecisionRequest.task_id == task_id)
+        if risk_level:
+            filters.append(DecisionRequest.risk_level == risk_level)
+        return self.db.scalars(select(DecisionRequest).where(*filters).order_by(DecisionRequest.created_at.desc())).all()
 
 
 class RepositoryRepository:

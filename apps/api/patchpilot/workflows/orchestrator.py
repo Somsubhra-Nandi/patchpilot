@@ -7,14 +7,17 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from patchpilot.agents.coding import AgentTaskContext, FakeCodingAgent, HumanDecision
 from patchpilot.agents.planner import create_plan, rank_files
 from patchpilot.caspian.protocols import CommunicationGateway, NullCommunicationGateway
 from patchpilot.core.config import Settings, get_settings
 from patchpilot.github.client import GitHubClient, GitHubError
 from patchpilot.models import AgentTask, Approval, Repository
+from patchpilot.models import DecisionRequest as DecisionModel
 from patchpilot.models.enums import ApprovalStatus, TaskStatus, WorkflowStage
 from patchpilot.repositories.domain import RepositoryRepository, TaskRepository
-from patchpilot.schemas.domain import DecisionRequest, TaskCreate
+from patchpilot.schemas.domain import HumanActionRequest, TaskCreate
+from patchpilot.services.policy import PolicyInput, evaluate_policy
 from patchpilot.services.security import (
     ensure_paths_allowed,
     parse_validation_command,
@@ -35,11 +38,13 @@ class WorkflowOrchestrator:
         settings: Settings | None = None,
         github: GitHubClient | None = None,
         gateway: CommunicationGateway | None = None,
+        coding_agent: FakeCodingAgent | None = None,
     ) -> None:
         self.db = db
         self.settings = settings or get_settings()
         self.github = github or GitHubClient(self.settings.github_token)
         self.gateway = gateway or NullCommunicationGateway()
+        self.coding_agent = coding_agent or FakeCodingAgent()
         self.tasks = TaskRepository(db)
         self.repositories = RepositoryRepository(db)
         self.state = WorkflowStateService(db)
@@ -172,6 +177,19 @@ class WorkflowOrchestrator:
             summary="Implementation plan generated",
             details={"plan": plan.model_dump(), "decision_summary": "Bounded deterministic plan"},
         )
+        context = AgentTaskContext(task_id=task.id, repository=task.repository.full_name, issue_number=task.github_issue_number, title=task.title, description=task.description, relevant_files=relevant_files, protected_paths=task.repository.protected_paths)
+        task.coding_agent_provider = self.coding_agent.provider
+        task.agent_execution_status = "running"
+        task.last_execution_at = datetime.now(UTC)
+        self.tasks.event(task, event_type="agent.started", stage=WorkflowStage.AGENT_STARTED, summary=f"{self.coding_agent.provider.title()} coding agent started", details={"provider": self.coding_agent.provider}, actor=self.coding_agent.provider)
+        result = await self.coding_agent.analyze(context)
+        task.external_session_id = result.session_id
+        task.agent_execution_status = result.status
+        task.last_checkpoint = result.checkpoint
+        task.last_execution_at = datetime.now(UTC)
+        if result.status == "decision_required" and result.decision:
+            await self._request_decision(task, result.decision.model_dump())
+            return
         approval = Approval(
             task_id=task.id,
             requested_channel=task.origin_channel,
@@ -200,7 +218,57 @@ class WorkflowOrchestrator:
             )
             self.db.commit()
 
-    async def approve(self, task: AgentTask, decision: DecisionRequest) -> AgentTask:
+    async def _request_decision(self, task: AgentTask, data: dict) -> DecisionModel:
+        decision = DecisionModel(task_id=task.id, requested_by_agent=self.coding_agent.provider, **data)
+        self.db.add(decision)
+        self.db.flush()
+        task.last_checkpoint = {**(task.last_checkpoint or {}), "decision_id": str(decision.id)}
+        self.state.transition(task, status=TaskStatus.WAITING_FOR_HUMAN, stage=WorkflowStage.DECISION_REQUESTED, summary=f"Agent paused: {decision.title}", details={"decision_id": str(decision.id), "risk": decision.risk_level, "options": decision.options, "recommendation": decision.recommended_option}, event_type="decision.requested", actor=self.coding_agent.provider)
+        await self.gateway.broadcast_task_update(task.id, f"Human decision required\n{str(decision.id)[:8]} — {decision.title}\nRisk: {decision.risk_level.upper()}\nRecommendation: {decision.recommended_option}\nChoose: patchpilot choose {str(decision.id)[:8]} <option>")
+        return decision
+
+    async def resolve_decision(self, decision: DecisionModel, *, option: str, actor: str, channel: str, note: str | None = None) -> AgentTask:
+        if decision.status != "pending":
+            raise WorkflowError("Decision is no longer pending")
+        valid = {str(item.get("id")) for item in decision.options}
+        if option not in valid:
+            raise WorkflowError(f"Invalid option {option}; choose one of {', '.join(sorted(valid))}")
+        task = self.tasks.get(decision.task_id)
+        if not task:
+            raise WorkflowError("Decision task no longer exists")
+        decision.status = "resolved"
+        decision.resolution = option
+        decision.resolution_note = note
+        decision.resolved_by = actor
+        decision.resolved_channel = channel
+        decision.resolved_at = datetime.now(UTC)
+        self.tasks.event(task, event_type="decision.resolved", stage=WorkflowStage.DECISION_RESOLVED, summary=f"Decision resolved from {channel} with option {option}", details={"decision_id": str(decision.id), "option": option}, channel=channel, actor=actor)
+        self.state.transition(task, status=TaskStatus.AGENT_RUNNING, stage=WorkflowStage.AGENT_RESUMED, summary=f"Agent resumed after decision by {actor}", details={"session_id": task.external_session_id, "option": option}, event_type="agent.resumed", channel=channel, actor=actor)
+        result = await self.coding_agent.continue_task(task.external_session_id or f"fake-{task.id}", HumanDecision(option=option, actor=actor, channel=channel, note=note))
+        task.agent_execution_status = result.status
+        task.last_checkpoint = {**result.checkpoint, "approved_decision_type": decision.decision_type}
+        task.last_execution_at = datetime.now(UTC)
+        if result.status == "blocked":
+            task.failure_reason = result.summary
+            self.state.transition(task, status=TaskStatus.FAILED, stage=WorkflowStage.AGENT_RESUMED, summary=result.summary)
+        else:
+            await self.implement(task)
+        return self.tasks.get(task.id) or task
+
+    async def pause(self, task: AgentTask, decision: HumanActionRequest) -> AgentTask:
+        if task.status in {TaskStatus.COMPLETED, TaskStatus.REJECTED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.WAITING_FOR_HUMAN}:
+            raise InvalidTransition(f"A {task.status} task cannot be paused")
+        self.state.transition(task, status=TaskStatus.AGENT_PAUSED, stage=WorkflowStage(task.current_stage), summary=f"Task paused by {decision.actor}", details={"note": decision.note}, channel=decision.channel, actor=decision.actor)
+        return self.tasks.get(task.id) or task
+
+    async def resume(self, task: AgentTask, decision: HumanActionRequest) -> AgentTask:
+        if task.status != TaskStatus.AGENT_PAUSED:
+            raise InvalidTransition("Only a manually paused task can be resumed")
+        self.state.transition(task, status=TaskStatus.AGENT_RUNNING, stage=WorkflowStage.AGENT_RESUMED, summary=f"Task resumed by {decision.actor}", details={"note": decision.note}, channel=decision.channel, actor=decision.actor)
+        await self.implement(task)
+        return self.tasks.get(task.id) or task
+
+    async def approve(self, task: AgentTask, decision: HumanActionRequest) -> AgentTask:
         if task.status != TaskStatus.AWAITING_APPROVAL:
             raise InvalidTransition("Only a task awaiting approval can be approved")
         approval = self.tasks.pending_approval(task.id)
@@ -223,7 +291,7 @@ class WorkflowOrchestrator:
         await self.implement(task)
         return self.tasks.get(task.id) or task
 
-    async def reject(self, task: AgentTask, decision: DecisionRequest) -> AgentTask:
+    async def reject(self, task: AgentTask, decision: HumanActionRequest) -> AgentTask:
         if task.status != TaskStatus.AWAITING_APPROVAL:
             raise InvalidTransition("Only a task awaiting approval can be rejected")
         approval = self.tasks.pending_approval(task.id)
@@ -245,7 +313,7 @@ class WorkflowOrchestrator:
         )
         return self.tasks.get(task.id) or task
 
-    async def cancel(self, task: AgentTask, decision: DecisionRequest) -> AgentTask:
+    async def cancel(self, task: AgentTask, decision: HumanActionRequest) -> AgentTask:
         if task.status in {TaskStatus.COMPLETED, TaskStatus.REJECTED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
             raise InvalidTransition(f"A {task.status} task cannot be cancelled")
         self.state.transition(
@@ -276,6 +344,11 @@ class WorkflowOrchestrator:
             for path in plan.get("relevant_files", ["README.md"])
             if not path.lower().endswith(("package-lock.json", "pnpm-lock.yaml", "yarn.lock"))
         ][:3]
+        policy = evaluate_policy(PolicyInput(changed_files=changed_files, protected_paths=task.repository.protected_paths))
+        self.tasks.event(task, event_type="policy.evaluated", stage=WorkflowStage.POLICY_EVALUATED, summary=policy.reason, details=policy.model_dump(mode="json"), actor="policy")
+        if policy.decision.value in {"require_human", "block"} and (task.last_checkpoint or {}).get("approved_decision_type") != policy.decision_type:
+            await self._request_decision(task, {"decision_type": policy.decision_type or "protected_path_change", "title": policy.reason, "context": {"relevant_files": changed_files}, "risk_level": policy.risk_level, "options": [{"id": "approve", "label": "Proceed with explicit approval"}, {"id": "abort", "label": "Abort change"}], "recommended_option": "abort" if policy.decision.value == "block" else "approve"})
+            return
         ensure_paths_allowed(changed_files, task.repository.protected_paths)
         patch_artifact = {
             "mode": "safe_demo" if not self.settings.github_write_enabled else "write_requested",
@@ -393,7 +466,7 @@ class WorkflowOrchestrator:
         checkout = self.settings.demo_repository_path
         if not commands:
             commands = ["pytest -q"]
-        if not checkout or not Path(checkout).is_dir():
+        if not checkout or str(checkout).strip() in {"", "."} or not Path(checkout).is_dir():
             return [
                 {
                     "command": command,

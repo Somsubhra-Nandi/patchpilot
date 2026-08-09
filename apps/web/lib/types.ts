@@ -69,6 +69,15 @@ export type Approval = {
   responded_at: string | null;
 };
 
+export type Decision = {
+  id: string; task_id: string; decision_type: string; title: string;
+  context: { relevant_files?: string[]; [key: string]: unknown };
+  risk_level: string; options: { id: string; label: string; risk?: string }[];
+  recommended_option: string | null; requested_by_agent: string; status: string;
+  created_at: string; resolved_at: string | null; resolved_by: string | null;
+  resolved_channel: string | null; resolution: string | null; resolution_note: string | null;
+};
+
 export type Task = {
   id: string;
   repository_id: string;
@@ -85,12 +94,18 @@ export type Task = {
   branch_name: string | null;
   pull_request_url: string | null;
   failure_reason: string | null;
+  coding_agent_provider: string | null;
+  external_session_id: string | null;
+  agent_execution_status: string | null;
+  last_checkpoint: Record<string, unknown>;
+  last_execution_at: string | null;
   created_at: string;
   updated_at: string;
   completed_at: string | null;
   repository: Repository;
   events: TaskEvent[];
   approvals: Approval[];
+  decisions: Decision[];
 };
 
 export type TaskList = { items: Task[]; total: number; page: number; page_size: number };

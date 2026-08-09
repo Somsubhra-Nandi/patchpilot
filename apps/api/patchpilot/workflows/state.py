@@ -15,7 +15,10 @@ class InvalidTransition(ValueError):
 
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     TaskStatus.CREATED: {TaskStatus.ANALYZING, TaskStatus.CANCELLED, TaskStatus.FAILED},
-    TaskStatus.ANALYZING: {TaskStatus.AWAITING_APPROVAL, TaskStatus.CANCELLED, TaskStatus.FAILED},
+    TaskStatus.ANALYZING: {TaskStatus.AGENT_RUNNING, TaskStatus.AWAITING_APPROVAL, TaskStatus.WAITING_FOR_HUMAN, TaskStatus.CANCELLED, TaskStatus.FAILED},
+    TaskStatus.AGENT_RUNNING: {TaskStatus.IMPLEMENTING, TaskStatus.WAITING_FOR_HUMAN, TaskStatus.AGENT_PAUSED, TaskStatus.FAILED, TaskStatus.CANCELLED},
+    TaskStatus.AGENT_PAUSED: {TaskStatus.AGENT_RUNNING, TaskStatus.CANCELLED, TaskStatus.FAILED},
+    TaskStatus.WAITING_FOR_HUMAN: {TaskStatus.AGENT_RUNNING, TaskStatus.REJECTED, TaskStatus.CANCELLED, TaskStatus.FAILED},
     TaskStatus.AWAITING_APPROVAL: {
         TaskStatus.APPROVED,
         TaskStatus.REJECTED,
@@ -23,7 +26,7 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
         TaskStatus.FAILED,
     },
     TaskStatus.APPROVED: {TaskStatus.IMPLEMENTING, TaskStatus.CANCELLED, TaskStatus.FAILED},
-    TaskStatus.IMPLEMENTING: {TaskStatus.VALIDATING, TaskStatus.CANCELLED, TaskStatus.FAILED},
+    TaskStatus.IMPLEMENTING: {TaskStatus.VALIDATING, TaskStatus.WAITING_FOR_HUMAN, TaskStatus.AGENT_PAUSED, TaskStatus.CANCELLED, TaskStatus.FAILED},
     TaskStatus.VALIDATING: {
         TaskStatus.CREATING_PULL_REQUEST,
         TaskStatus.CANCELLED,
@@ -58,6 +61,8 @@ class WorkflowStateService:
         actor: str = "patchpilot",
         channel: str | None = None,
     ) -> None:
+        if status == task.status:
+            raise InvalidTransition(f"Task is already {status}")
         if status not in ALLOWED_TRANSITIONS.get(task.status, set()):
             raise InvalidTransition(f"Cannot transition task from {task.status} to {status}")
         task.status = status

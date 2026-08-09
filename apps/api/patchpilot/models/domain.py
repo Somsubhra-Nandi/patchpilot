@@ -54,6 +54,11 @@ class AgentTask(Base, TimestampMixin):
     branch_name: Mapped[str | None] = mapped_column(String(255))
     pull_request_url: Mapped[str | None] = mapped_column(String(1024))
     failure_reason: Mapped[str | None] = mapped_column(Text)
+    coding_agent_provider: Mapped[str | None] = mapped_column(String(64))
+    external_session_id: Mapped[str | None] = mapped_column(String(512), index=True)
+    agent_execution_status: Mapped[str | None] = mapped_column(String(64), index=True)
+    last_checkpoint: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    last_execution_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     repository: Mapped[Repository] = relationship(back_populates="tasks")
@@ -63,6 +68,33 @@ class AgentTask(Base, TimestampMixin):
     approvals: Mapped[list["Approval"]] = relationship(
         back_populates="task", cascade="all, delete-orphan"
     )
+    decisions: Mapped[list["DecisionRequest"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan", order_by="DecisionRequest.created_at"
+    )
+
+
+class DecisionRequest(Base):
+    __tablename__ = "decision_requests"
+    __table_args__ = (Index("ix_decision_requests_status_created", "status", "created_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    task_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agent_tasks.id"), index=True)
+    decision_type: Mapped[str] = mapped_column(String(64), index=True)
+    title: Mapped[str] = mapped_column(String(512))
+    context: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    risk_level: Mapped[str] = mapped_column(String(32), index=True)
+    options: Mapped[list[dict[str, Any]]] = mapped_column(JSONType, default=list)
+    recommended_option: Mapped[str | None] = mapped_column(String(128))
+    requested_by_agent: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_by: Mapped[str | None] = mapped_column(String(512))
+    resolved_channel: Mapped[str | None] = mapped_column(String(64))
+    resolution: Mapped[str | None] = mapped_column(String(128))
+    resolution_note: Mapped[str | None] = mapped_column(Text)
+
+    task: Mapped[AgentTask] = relationship(back_populates="decisions")
 
 
 class TaskEvent(Base):
@@ -122,4 +154,3 @@ class ProcessedInboundMessage(Base):
     message_id: Mapped[str] = mapped_column(String(512))
     task_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("agent_tasks.id"))
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-

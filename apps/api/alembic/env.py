@@ -1,8 +1,8 @@
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from alembic import context
 from patchpilot.core.config import get_settings
 from patchpilot.db.base import Base
 from patchpilot.models import *  # noqa: F403
@@ -39,4 +39,3 @@ def run_migrations_online() -> None:
 
 
 run_migrations_offline() if context.is_offline_mode() else run_migrations_online()
-

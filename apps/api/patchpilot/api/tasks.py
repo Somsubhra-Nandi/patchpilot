@@ -15,7 +15,7 @@ from patchpilot.db.session import SessionLocal, get_db
 from patchpilot.models import AgentTask, TaskEvent
 from patchpilot.repositories.domain import TaskRepository
 from patchpilot.schemas.domain import (
-    DecisionRequest,
+    HumanActionRequest,
     TaskCreate,
     TaskEventRead,
     TaskList,
@@ -67,7 +67,7 @@ def get_task(task_id: uuid.UUID, db: Session = Depends(get_db)) -> AgentTask:
 
 
 async def apply_decision(
-    task_id: uuid.UUID, data: DecisionRequest, action: str, db: Session
+    task_id: uuid.UUID, data: HumanActionRequest, action: str, db: Session
 ) -> AgentTask:
     task = task_or_404(task_id, db)
     workflow = WorkflowOrchestrator(db, gateway=get_gateway())
@@ -79,23 +79,33 @@ async def apply_decision(
 
 @router.post("/{task_id}/approve", response_model=TaskRead)
 async def approve_task(
-    task_id: uuid.UUID, data: DecisionRequest, db: Session = Depends(get_db)
+    task_id: uuid.UUID, data: HumanActionRequest, db: Session = Depends(get_db)
 ) -> AgentTask:
     return await apply_decision(task_id, data, "approve", db)
 
 
 @router.post("/{task_id}/reject", response_model=TaskRead)
 async def reject_task(
-    task_id: uuid.UUID, data: DecisionRequest, db: Session = Depends(get_db)
+    task_id: uuid.UUID, data: HumanActionRequest, db: Session = Depends(get_db)
 ) -> AgentTask:
     return await apply_decision(task_id, data, "reject", db)
 
 
 @router.post("/{task_id}/cancel", response_model=TaskRead)
 async def cancel_task(
-    task_id: uuid.UUID, data: DecisionRequest, db: Session = Depends(get_db)
+    task_id: uuid.UUID, data: HumanActionRequest, db: Session = Depends(get_db)
 ) -> AgentTask:
     return await apply_decision(task_id, data, "cancel", db)
+
+
+@router.post("/{task_id}/pause", response_model=TaskRead)
+async def pause_task(task_id: uuid.UUID, data: HumanActionRequest, db: Session = Depends(get_db)) -> AgentTask:
+    return await apply_decision(task_id, data, "pause", db)
+
+
+@router.post("/{task_id}/resume", response_model=TaskRead)
+async def resume_task(task_id: uuid.UUID, data: HumanActionRequest, db: Session = Depends(get_db)) -> AgentTask:
+    return await apply_decision(task_id, data, "resume", db)
 
 
 @router.get("/{task_id}/events", response_model=list[TaskEventRead])
@@ -149,4 +159,3 @@ async def stream_task(task_id: uuid.UUID, db: Session = Depends(get_db)) -> Stre
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-

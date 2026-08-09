@@ -1,7 +1,6 @@
 """Initial PatchPilot schema."""
 
 from alembic import op
-
 from patchpilot.db.base import Base
 from patchpilot.models import *  # noqa: F403
 
@@ -17,4 +16,3 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     Base.metadata.drop_all(bind=op.get_bind())
-
