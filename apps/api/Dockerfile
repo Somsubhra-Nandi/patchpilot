@@ -5,6 +5,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends git nodejs npm ca-certificates && npm install -g @openai/codex && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml ./
 COPY alembic.ini ./
 COPY alembic ./alembic

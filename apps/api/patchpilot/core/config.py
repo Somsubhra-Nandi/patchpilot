@@ -24,6 +24,14 @@ class Settings(BaseSettings):
     patchpilot_demo_mode: bool = True
     demo_repository_path: Path | None = None
 
+    coding_agent_provider: str = "fake"
+    codex_cli_path: str = "codex"
+    codex_model: str | None = None
+    codex_timeout_seconds: int = 1800
+    agent_workspace_root: Path = Path("/workspaces")
+    agent_workspace_retain: bool = True
+    agent_validation_max_attempts: int = 3
+
     llm_provider: str = "deterministic"
     llm_api_key: str | None = None
     llm_model: str = "deterministic-planner-v1"

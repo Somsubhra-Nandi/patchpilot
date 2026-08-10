@@ -25,8 +25,17 @@ services:
       FRONTEND_URL: http://localhost:3000
       AUTO_CREATE_SCHEMA: "false"
       SEED_DEMO_DATA: "true"
+    # Codex uses bubblewrap to enforce its workspace sandbox; Docker's default
+    # seccomp profile blocks the user-namespace syscall bubblewrap requires.
+    security_opt:
+      - seccomp=unconfined
+    cap_add:
+      - SYS_ADMIN
     ports:
       - "8000:8000"
+    volumes:
+      - patchpilot_workspaces:/workspaces
+      - patchpilot_codex:/root/.codex
     depends_on:
       postgres:
         condition: service_healthy
@@ -55,4 +64,5 @@ services:
 
 volumes:
   patchpilot_postgres:
-
+  patchpilot_workspaces:
+  patchpilot_codex:

@@ -8,6 +8,9 @@ os.environ["DATABASE_URL"] = "sqlite:///./test_patchpilot.sqlite3"
 os.environ["SEED_DEMO_DATA"] = "false"
 os.environ["AUTO_CREATE_SCHEMA"] = "true"
 os.environ["PATCHPILOT_DEMO_MODE"] = "true"
+os.environ["CODING_AGENT_PROVIDER"] = "fake"
+os.environ["CASPIAN_ENABLED"] = "false"
+os.environ["CASPIAN_START_LISTENER"] = "false"
 
 from patchpilot.db.base import Base  # noqa: E402
 from patchpilot.db.session import SessionLocal, engine  # noqa: E402
@@ -39,4 +42,3 @@ def pytest_sessionfinish(session, exitstatus):
     path = Path("test_patchpilot.sqlite3")
     if path.exists():
         path.unlink()
-

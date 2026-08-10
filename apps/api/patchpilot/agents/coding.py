@@ -15,6 +15,11 @@ class AgentTaskContext(BaseModel):
     relevant_files: list[str] = Field(default_factory=list)
     protected_paths: list[str] = Field(default_factory=list)
     checkpoint: dict = Field(default_factory=dict)
+    workspace_path: str | None = None
+    source_commit_sha: str | None = None
+    coding_guidelines: str | None = None
+    test_command: str | None = None
+    lint_command: str | None = None
 
 
 class HumanDecision(BaseModel):
@@ -24,12 +29,39 @@ class HumanDecision(BaseModel):
     note: str | None = None
 
 
+class AgentDecisionContext(BaseModel):
+    relevant_files: list[str] = Field(default_factory=list)
+    observable_actions: list[str] = Field(default_factory=list)
+    summary: str | None = None
+
+
+class AgentDecisionOption(BaseModel):
+    id: str
+    label: str
+    risk: Literal["low", "medium", "high", "critical"] | None = None
+
+
+class ObservableAgentAction(BaseModel):
+    action: str
+    summary: str
+    path: str | None = None
+    status: Literal["completed", "attempted", "blocked", "failed"] = "completed"
+
+
+class AgentCheckpoint(BaseModel):
+    phase: str | None = None
+    scenario: str | None = None
+    selected_option: str | None = None
+    decision_id: str | None = None
+    summary: str | None = None
+
+
 class AgentDecision(BaseModel):
     decision_type: str
     title: str
-    context: dict = Field(default_factory=dict)
+    context: AgentDecisionContext = Field(default_factory=AgentDecisionContext)
     risk_level: Literal["low", "medium", "high", "critical"] = "medium"
-    options: list[dict]
+    options: list[AgentDecisionOption]
     recommended_option: str | None = None
 
 
@@ -37,14 +69,21 @@ class AgentResult(BaseModel):
     status: Literal["completed", "decision_required", "failed", "blocked"]
     session_id: str
     summary: str
-    checkpoint: dict = Field(default_factory=dict)
-    actions: list[dict] = Field(default_factory=list)
+    checkpoint: AgentCheckpoint = Field(default_factory=AgentCheckpoint)
+    actions: list[ObservableAgentAction] = Field(default_factory=list)
     decision: AgentDecision | None = None
     error: str | None = None
 
 
 class AgentAnalysis(AgentResult):
+    issue_summary: str = "Analysis completed"
+    suspected_change: str = "See agent summary"
     relevant_files: list[str] = Field(default_factory=list)
+    proposed_modifications: list[str] = Field(default_factory=list)
+    validation_strategy: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    open_questions: list[str] = Field(default_factory=list)
+    confidence: Literal["low", "medium", "high"] = "medium"
 
 
 class AgentExecutionResult(AgentResult):

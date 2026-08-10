@@ -7,8 +7,15 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from patchpilot.agents.coding import AgentTaskContext, FakeCodingAgent, HumanDecision
+from patchpilot.agents.coding import (
+    AgentExecutionResult,
+    AgentTaskContext,
+    CodingAgent,
+    HumanDecision,
+)
+from patchpilot.agents.factory import create_coding_agent
 from patchpilot.agents.planner import create_plan, rank_files
+from patchpilot.agents.workspace import WorkspaceError, WorkspaceManager
 from patchpilot.caspian.protocols import CommunicationGateway, NullCommunicationGateway
 from patchpilot.core.config import Settings, get_settings
 from patchpilot.github.client import GitHubClient, GitHubError
@@ -38,13 +45,14 @@ class WorkflowOrchestrator:
         settings: Settings | None = None,
         github: GitHubClient | None = None,
         gateway: CommunicationGateway | None = None,
-        coding_agent: FakeCodingAgent | None = None,
+        coding_agent: CodingAgent | None = None,
     ) -> None:
         self.db = db
         self.settings = settings or get_settings()
         self.github = github or GitHubClient(self.settings.github_token)
         self.gateway = gateway or NullCommunicationGateway()
-        self.coding_agent = coding_agent or FakeCodingAgent()
+        self.coding_agent = coding_agent or create_coding_agent(self.settings)
+        self.workspaces = WorkspaceManager(self.settings.agent_workspace_root, retain=self.settings.agent_workspace_retain)
         self.tasks = TaskRepository(db)
         self.repositories = RepositoryRepository(db)
         self.state = WorkflowStateService(db)
@@ -177,7 +185,19 @@ class WorkflowOrchestrator:
             summary="Implementation plan generated",
             details={"plan": plan.model_dump(), "decision_summary": "Bounded deterministic plan"},
         )
-        context = AgentTaskContext(task_id=task.id, repository=task.repository.full_name, issue_number=task.github_issue_number, title=task.title, description=task.description, relevant_files=relevant_files, protected_paths=task.repository.protected_paths)
+        if self.coding_agent.provider == "codex":
+            task.workspace_status = "preparing"
+            try:
+                workspace = await self.workspaces.prepare(task.id, f"{task.repository.github_url}.git", task.repository.default_branch)
+            except WorkspaceError as exc:
+                task.workspace_status = "failed"
+                task.failure_reason = str(exc)
+                self.state.transition(task, status=TaskStatus.FAILED, stage=WorkflowStage.REPOSITORY_INSPECTED, summary="Isolated repository workspace could not be prepared", details={"error": str(exc)})
+                return
+            task.workspace_path = str(workspace.path)
+            task.source_commit_sha = workspace.source_sha
+            task.workspace_status = "ready"
+        context = self._agent_context(task, relevant_files)
         task.coding_agent_provider = self.coding_agent.provider
         task.agent_execution_status = "running"
         task.last_execution_at = datetime.now(UTC)
@@ -185,10 +205,27 @@ class WorkflowOrchestrator:
         result = await self.coding_agent.analyze(context)
         task.external_session_id = result.session_id
         task.agent_execution_status = result.status
-        task.last_checkpoint = result.checkpoint
+        task.last_checkpoint = result.checkpoint.model_dump(exclude_none=True)
         task.last_execution_at = datetime.now(UTC)
+        if self.coding_agent.provider == "codex":
+            plan = {
+                "issue_summary": result.issue_summary,
+                "suspected_change": result.suspected_change,
+                "relevant_files": result.relevant_files,
+                "proposed_modifications": result.proposed_modifications,
+                "validation_strategy": result.validation_strategy,
+                "risks": result.risks,
+                "open_questions": result.open_questions,
+                "confidence": result.confidence,
+            }
+            self.state.advance(task, stage=WorkflowStage.PLAN_GENERATED, summary="Codex analysis completed", details={"plan": plan, "decision_summary": result.summary}, event_type="agent.analysis_completed", actor="codex")
         if result.status == "decision_required" and result.decision:
             await self._request_decision(task, result.decision.model_dump())
+            return
+        if result.status in {"failed", "blocked"}:
+            task.failure_reason = result.error or result.summary
+            task.workspace_status = "failed" if task.workspace_path else task.workspace_status
+            self.state.transition(task, status=TaskStatus.FAILED, stage=WorkflowStage.AGENT_STARTED, summary=result.summary, details={"error": result.error}, actor=self.coding_agent.provider)
             return
         approval = Approval(
             task_id=task.id,
@@ -244,15 +281,22 @@ class WorkflowOrchestrator:
         decision.resolved_at = datetime.now(UTC)
         self.tasks.event(task, event_type="decision.resolved", stage=WorkflowStage.DECISION_RESOLVED, summary=f"Decision resolved from {channel} with option {option}", details={"decision_id": str(decision.id), "option": option}, channel=channel, actor=actor)
         self.state.transition(task, status=TaskStatus.AGENT_RUNNING, stage=WorkflowStage.AGENT_RESUMED, summary=f"Agent resumed after decision by {actor}", details={"session_id": task.external_session_id, "option": option}, event_type="agent.resumed", channel=channel, actor=actor)
+        if self.coding_agent.provider == "codex" and task.external_session_id and task.workspace_path:
+            if not task.branch_name:
+                task.branch_name = f"patchpilot/issue-{task.github_issue_number}-{str(task.id)[:8]}"
+                await self.workspaces.create_branch(Path(task.workspace_path), task.branch_name)
+            restore = getattr(self.coding_agent, "restore_session", None)
+            if restore:
+                restore(task.external_session_id, task.workspace_path)
         result = await self.coding_agent.continue_task(task.external_session_id or f"fake-{task.id}", HumanDecision(option=option, actor=actor, channel=channel, note=note))
         task.agent_execution_status = result.status
-        task.last_checkpoint = {**result.checkpoint, "approved_decision_type": decision.decision_type}
+        task.last_checkpoint = {**result.checkpoint.model_dump(exclude_none=True), "approved_decision_type": decision.decision_type}
         task.last_execution_at = datetime.now(UTC)
         if result.status == "blocked":
             task.failure_reason = result.summary
             self.state.transition(task, status=TaskStatus.FAILED, stage=WorkflowStage.AGENT_RESUMED, summary=result.summary)
         else:
-            await self.implement(task)
+            await self.implement(task, execution_result=result)
         return self.tasks.get(task.id) or task
 
     async def pause(self, task: AgentTask, decision: HumanActionRequest) -> AgentTask:
@@ -265,7 +309,14 @@ class WorkflowOrchestrator:
         if task.status != TaskStatus.AGENT_PAUSED:
             raise InvalidTransition("Only a manually paused task can be resumed")
         self.state.transition(task, status=TaskStatus.AGENT_RUNNING, stage=WorkflowStage.AGENT_RESUMED, summary=f"Task resumed by {decision.actor}", details={"note": decision.note}, channel=decision.channel, actor=decision.actor)
-        await self.implement(task)
+        if self.coding_agent.provider == "codex" and task.external_session_id and task.workspace_path:
+            restore = getattr(self.coding_agent, "restore_session", None)
+            if restore:
+                restore(task.external_session_id, task.workspace_path)
+            result = await self.coding_agent.continue_task(task.external_session_id, HumanDecision(option="resume", actor=decision.actor, channel=decision.channel, note=decision.note))
+            await self.implement(task, execution_result=result)
+        else:
+            await self.implement(task)
         return self.tasks.get(task.id) or task
 
     async def approve(self, task: AgentTask, decision: HumanActionRequest) -> AgentTask:
@@ -288,7 +339,16 @@ class WorkflowOrchestrator:
             channel=decision.channel,
             actor=decision.actor,
         )
-        await self.implement(task)
+        if self.coding_agent.provider == "codex" and task.external_session_id and task.workspace_path:
+            task.branch_name = f"patchpilot/issue-{task.github_issue_number}-{str(task.id)[:8]}"
+            await self.workspaces.create_branch(Path(task.workspace_path), task.branch_name)
+            restore = getattr(self.coding_agent, "restore_session", None)
+            if restore:
+                restore(task.external_session_id, task.workspace_path)
+            result = await self.coding_agent.continue_task(task.external_session_id, HumanDecision(option="approve", actor=decision.actor, channel=decision.channel, note=decision.note))
+            await self.implement(task, execution_result=result)
+        else:
+            await self.implement(task)
         return self.tasks.get(task.id) or task
 
     async def reject(self, task: AgentTask, decision: HumanActionRequest) -> AgentTask:
@@ -327,7 +387,7 @@ class WorkflowOrchestrator:
         )
         return self.tasks.get(task.id) or task
 
-    async def implement(self, task: AgentTask) -> None:
+    async def implement(self, task: AgentTask, execution_result: AgentExecutionResult | None = None) -> None:
         branch = f"patchpilot/issue-{task.github_issue_number}-{str(task.id)[:8]}"
         task.branch_name = branch
         self.state.transition(
@@ -337,22 +397,46 @@ class WorkflowOrchestrator:
             summary=f"Prepared isolated branch {branch}",
             details={"branch": branch, "simulated": not self.settings.github_write_enabled},
         )
-        plan_event = next((event for event in task.events if event.stage == "plan_generated"), None)
+        if self.coding_agent.provider == "codex":
+            if not task.workspace_path:
+                raise WorkflowError("Codex task has no isolated workspace")
+            workspace_path = Path(task.workspace_path)
+            if not execution_result:
+                await self.workspaces.create_branch(workspace_path, branch)
+                task.workspace_status = "agent_running"
+                execution_result = await self.coding_agent.implement(self._agent_context(task))
+            task.external_session_id = execution_result.session_id
+            task.agent_execution_status = execution_result.status
+            task.last_checkpoint = execution_result.checkpoint.model_dump(exclude_none=True)
+            task.last_execution_at = datetime.now(UTC)
+            if execution_result.status == "decision_required" and execution_result.decision:
+                task.workspace_status = "paused"
+                await self._request_decision(task, execution_result.decision.model_dump())
+                return
+            if execution_result.status in {"failed", "blocked"}:
+                task.workspace_status = "failed"
+                task.failure_reason = execution_result.error or execution_result.summary
+                self.state.transition(task, status=TaskStatus.FAILED, stage=WorkflowStage.CHANGES_GENERATED, summary=execution_result.summary, details={"error": execution_result.error})
+                return
+        plan_event = next((event for event in reversed(task.events) if event.stage == "plan_generated"), None)
         plan = (plan_event.details or {}).get("plan", {}) if plan_event else {}
-        changed_files = [
-            path
-            for path in plan.get("relevant_files", ["README.md"])
-            if not path.lower().endswith(("package-lock.json", "pnpm-lock.yaml", "yarn.lock"))
-        ][:3]
-        policy = evaluate_policy(PolicyInput(changed_files=changed_files, protected_paths=task.repository.protected_paths))
+        if self.coding_agent.provider == "codex":
+            changed_files = await self.workspaces.changed_files(Path(task.workspace_path or ""))
+            diff_lines, diff_summary = await self.workspaces.diff_summary(Path(task.workspace_path or ""))
+        else:
+            changed_files = [path for path in plan.get("relevant_files", ["README.md"]) if not path.lower().endswith(("package-lock.json", "pnpm-lock.yaml", "yarn.lock"))][:3]
+            diff_lines, diff_summary = 0, "Deterministic demo proposal"
+        policy = evaluate_policy(PolicyInput(changed_files=changed_files, protected_paths=task.repository.protected_paths, diff_lines=diff_lines))
         self.tasks.event(task, event_type="policy.evaluated", stage=WorkflowStage.POLICY_EVALUATED, summary=policy.reason, details=policy.model_dump(mode="json"), actor="policy")
         if policy.decision.value in {"require_human", "block"} and (task.last_checkpoint or {}).get("approved_decision_type") != policy.decision_type:
             await self._request_decision(task, {"decision_type": policy.decision_type or "protected_path_change", "title": policy.reason, "context": {"relevant_files": changed_files}, "risk_level": policy.risk_level, "options": [{"id": "approve", "label": "Proceed with explicit approval"}, {"id": "abort", "label": "Abort change"}], "recommended_option": "abort" if policy.decision.value == "block" else "approve"})
             return
-        ensure_paths_allowed(changed_files, task.repository.protected_paths)
+        if (task.last_checkpoint or {}).get("approved_decision_type") != "protected_path_change":
+            ensure_paths_allowed(changed_files, task.repository.protected_paths)
         patch_artifact = {
-            "mode": "safe_demo" if not self.settings.github_write_enabled else "write_requested",
+            "mode": "isolated_workspace" if self.coding_agent.provider == "codex" else ("safe_demo" if not self.settings.github_write_enabled else "write_requested"),
             "changed_files": changed_files,
+            "diff_summary": diff_summary,
             "diffs": [
                 {
                     "path": path,
@@ -367,7 +451,7 @@ class WorkflowOrchestrator:
             task,
             stage=WorkflowStage.CHANGES_GENERATED,
             summary=f"Generated a safe proposed patch across {len(changed_files)} files",
-            details={"artifact": patch_artifact, "simulated": True},
+            details={"artifact": patch_artifact, "simulated": self.coding_agent.provider != "codex"},
         )
         self.state.transition(
             task,
@@ -375,8 +459,9 @@ class WorkflowOrchestrator:
             stage=WorkflowStage.TESTS_RUN,
             summary="Running configured validation",
         )
-        results = await self._validate(task)
-        failed = any(result["exit_code"] != 0 for result in results)
+        results = await self._validate(task, Path(task.workspace_path) if task.workspace_path else None)
+        final_by_command = {result["command"]: result for result in results}
+        failed = any(result["exit_code"] != 0 for result in final_by_command.values())
         self.state.advance(
             task,
             stage=WorkflowStage.TESTS_RUN,
@@ -385,15 +470,16 @@ class WorkflowOrchestrator:
             event_type="validation.completed",
         )
         if failed:
-            task.failure_reason = "One or more configured validation commands failed"
-            self.state.transition(
-                task,
-                status=TaskStatus.FAILED,
-                stage=WorkflowStage.TESTS_RUN,
-                summary="Workflow stopped after failed validation",
-                details={"results": results},
-            )
+            if self.coding_agent.provider == "codex":
+                task.workspace_status = "paused"
+                await self._request_decision(task, {"decision_type": "retry_exhausted", "title": "Validation retry limit was exhausted", "context": {"results": results, "relevant_files": changed_files}, "risk_level": "medium", "options": [{"id": "retry", "label": "Let Codex retry"}, {"id": "continue", "label": "Continue with known failure"}, {"id": "abort", "label": "Abort task"}], "recommended_option": "retry"})
+            else:
+                task.failure_reason = "One or more configured validation commands failed"
+                self.state.transition(task, status=TaskStatus.FAILED, stage=WorkflowStage.TESTS_RUN, summary="Workflow stopped after failed validation", details={"results": results})
             return
+        if self.coding_agent.provider == "codex":
+            review = await self.coding_agent.review(self._agent_context(task, changed_files))
+            self.tasks.event(task, event_type="agent.review_completed", stage=WorkflowStage.TESTS_RUN, summary=review.summary, details={"findings": review.findings, "status": review.status}, actor="codex")
         self.state.transition(
             task,
             status=TaskStatus.CREATING_PULL_REQUEST,
@@ -460,10 +546,13 @@ class WorkflowOrchestrator:
             f"PatchPilot completed {task.repository.full_name}#{task.github_issue_number}. "
             f"Validation passed; a safe draft PR payload is ready. Task: {task.id}",
         )
+        task.workspace_status = "retained" if self.settings.agent_workspace_retain else "cleaned"
+        self.workspaces.cleanup(task.id)
+        self.db.commit()
 
-    async def _validate(self, task: AgentTask) -> list[dict]:
+    async def _validate(self, task: AgentTask, workspace: Path | None = None) -> list[dict]:
         commands = [command for command in (task.repository.lint_command, task.repository.test_command) if command]
-        checkout = self.settings.demo_repository_path
+        checkout = workspace or self.settings.demo_repository_path
         if not commands:
             commands = ["pytest -q"]
         if not checkout or str(checkout).strip() in {"", "."} or not Path(checkout).is_dir():
@@ -480,29 +569,24 @@ class WorkflowOrchestrator:
         results = []
         for command in commands:
             argv = parse_validation_command(command)
-            started = time.perf_counter()
-            process = await asyncio.create_subprocess_exec(
-                *argv,
-                cwd=str(checkout),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            try:
-                output, _ = await asyncio.wait_for(process.communicate(), timeout=120)
-            except TimeoutError:
-                process.kill()
-                await process.wait()
-                output = b"Validation timed out after 120 seconds"
-            results.append(
-                {
-                    "command": command,
-                    "exit_code": process.returncode if process.returncode is not None else 124,
-                    "duration_ms": int((time.perf_counter() - started) * 1000),
-                    "output_summary": output.decode(errors="replace")[-4000:],
-                    "simulated": False,
-                }
-            )
+            attempts = self.settings.agent_validation_max_attempts if workspace else 1
+            for attempt in range(1, attempts + 1):
+                started = time.perf_counter()
+                process = await asyncio.create_subprocess_exec(*argv, cwd=str(checkout), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+                try:
+                    output, _ = await asyncio.wait_for(process.communicate(), timeout=120)
+                except TimeoutError:
+                    process.kill()
+                    await process.wait()
+                    output = b"Validation timed out after 120 seconds"
+                exit_code = process.returncode if process.returncode is not None else 124
+                results.append({"command": command, "exit_code": exit_code, "duration_ms": int((time.perf_counter() - started) * 1000), "output_summary": output.decode(errors="replace")[-4000:], "simulated": False, "attempt": attempt, "retried": attempt > 1})
+                if exit_code == 0:
+                    break
         return results
+
+    def _agent_context(self, task: AgentTask, relevant_files: list[str] | None = None) -> AgentTaskContext:
+        return AgentTaskContext(task_id=task.id, repository=task.repository.full_name, issue_number=task.github_issue_number, title=task.title, description=task.description, relevant_files=relevant_files or [], protected_paths=task.repository.protected_paths, checkpoint=task.last_checkpoint or {}, workspace_path=task.workspace_path, source_commit_sha=task.source_commit_sha, coding_guidelines=task.repository.coding_guidelines, test_command=task.repository.test_command, lint_command=task.repository.lint_command)
 
     @staticmethod
     def _plan_message(task: AgentTask, plan: dict) -> str:

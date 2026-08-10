@@ -99,6 +99,9 @@ export type Task = {
   agent_execution_status: string | null;
   last_checkpoint: Record<string, unknown>;
   last_execution_at: string | null;
+  workspace_path: string | null;
+  workspace_status: string | null;
+  source_commit_sha: string | null;
   created_at: string;
   updated_at: string;
   completed_at: string | null;

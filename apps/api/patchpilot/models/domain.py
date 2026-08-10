@@ -59,6 +59,9 @@ class AgentTask(Base, TimestampMixin):
     agent_execution_status: Mapped[str | None] = mapped_column(String(64), index=True)
     last_checkpoint: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
     last_execution_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    workspace_path: Mapped[str | None] = mapped_column(String(1024))
+    workspace_status: Mapped[str | None] = mapped_column(String(64), index=True)
+    source_commit_sha: Mapped[str | None] = mapped_column(String(64))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     repository: Mapped[Repository] = relationship(back_populates="tasks")

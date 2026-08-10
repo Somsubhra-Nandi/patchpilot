@@ -121,6 +121,9 @@ class TaskRead(ORMModel):
     agent_execution_status: str | None
     last_checkpoint: dict[str, Any]
     last_execution_at: datetime | None
+    workspace_path: str | None
+    workspace_status: str | None
+    source_commit_sha: str | None
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None

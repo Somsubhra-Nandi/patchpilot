@@ -29,6 +29,7 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     TaskStatus.IMPLEMENTING: {TaskStatus.VALIDATING, TaskStatus.WAITING_FOR_HUMAN, TaskStatus.AGENT_PAUSED, TaskStatus.CANCELLED, TaskStatus.FAILED},
     TaskStatus.VALIDATING: {
         TaskStatus.CREATING_PULL_REQUEST,
+        TaskStatus.WAITING_FOR_HUMAN,
         TaskStatus.CANCELLED,
         TaskStatus.FAILED,
     },
