@@ -75,6 +75,20 @@ class AgentResult(BaseModel):
     error: str | None = None
 
 
+class SkippedValidationCheck(BaseModel):
+    command_or_check: str
+    reason: str
+
+
+class ValidationPlan(BaseModel):
+    commands_to_run: list[str] = Field(default_factory=list)
+    checks_skipped: list[SkippedValidationCheck] = Field(default_factory=list)
+    rationale: str
+    relevant_test_files: list[str] = Field(default_factory=list)
+    validation_scope: Literal["targeted", "full", "none"]
+    confidence: Literal["low", "medium", "high"]
+
+
 class AgentAnalysis(AgentResult):
     issue_summary: str = "Analysis completed"
     suspected_change: str = "See agent summary"
@@ -84,10 +98,12 @@ class AgentAnalysis(AgentResult):
     risks: list[str] = Field(default_factory=list)
     open_questions: list[str] = Field(default_factory=list)
     confidence: Literal["low", "medium", "high"] = "medium"
+    validation_plan: ValidationPlan | None = None
 
 
 class AgentExecutionResult(AgentResult):
     changed_files: list[str] = Field(default_factory=list)
+    validation_plan: ValidationPlan | None = None
 
 
 class AgentReviewResult(AgentResult):

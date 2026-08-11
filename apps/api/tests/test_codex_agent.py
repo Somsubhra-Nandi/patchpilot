@@ -58,11 +58,13 @@ def test_codex_schema_is_strict_recursively(model):
 
 def test_strict_execution_schema_preserves_result_contract():
     schema = strict_output_schema(AgentExecutionResult)
-    assert {"status", "session_id", "summary", "checkpoint", "actions", "decision", "error", "changed_files"} == set(schema["required"])
+    assert {"status", "session_id", "summary", "checkpoint", "actions", "decision", "error", "changed_files", "validation_plan"} == set(schema["required"])
     assert "$defs" in schema
     assert "AgentDecision" in schema["$defs"]
     assert "AgentCheckpoint" in schema["$defs"]
     assert "ObservableAgentAction" in schema["$defs"]
+    assert "ValidationPlan" in schema["$defs"]
+    assert "SkippedValidationCheck" in schema["$defs"]
 
 
 def test_provider_selection():

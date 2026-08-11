@@ -20,6 +20,19 @@ export type ValidationResult = {
   duration_ms: number;
   output_summary: string;
   simulated: boolean;
+  attempt?: number;
+  retried?: boolean;
+};
+
+export type ValidationPlan = {
+  commands_to_run: string[];
+  checks_skipped: { command_or_check: string; reason: string }[];
+  rationale: string;
+  relevant_test_files: string[];
+  validation_scope: "targeted" | "full" | "none";
+  confidence: "low" | "medium" | "high";
+  broadened_by_policy?: boolean;
+  policy_reasons?: string[];
 };
 
 export type PullRequestPayload = {
@@ -37,6 +50,8 @@ export type EventDetails = {
   [key: string]: unknown;
   plan?: Plan;
   results?: ValidationResult[];
+  proposed_validation_plan?: ValidationPlan;
+  approved_validation_plan?: ValidationPlan;
   simulated?: boolean;
   mode?: string;
   error?: unknown;

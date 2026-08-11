@@ -12,6 +12,7 @@ from patchpilot.agents.coding import (
     AgentTaskContext,
     CodingAgent,
     HumanDecision,
+    ValidationPlan,
 )
 from patchpilot.agents.factory import create_coding_agent
 from patchpilot.agents.planner import create_plan, rank_files
@@ -30,6 +31,7 @@ from patchpilot.services.security import (
     parse_validation_command,
     validate_repository_identifier,
 )
+from patchpilot.services.validation import ApprovedValidationPlan, review_validation_plan
 from patchpilot.workflows.state import InvalidTransition, WorkflowStateService
 
 
@@ -217,6 +219,7 @@ class WorkflowOrchestrator:
                 "risks": result.risks,
                 "open_questions": result.open_questions,
                 "confidence": result.confidence,
+                "validation_plan": result.validation_plan.model_dump() if result.validation_plan else None,
             }
             self.state.advance(task, stage=WorkflowStage.PLAN_GENERATED, summary="Codex analysis completed", details={"plan": plan, "decision_summary": result.summary}, event_type="agent.analysis_completed", actor="codex")
         if result.status == "decision_required" and result.decision:
@@ -453,20 +456,69 @@ class WorkflowOrchestrator:
             summary=f"Generated a safe proposed patch across {len(changed_files)} files",
             details={"artifact": patch_artifact, "simulated": self.coding_agent.provider != "codex"},
         )
+        proposed_validation = self._proposed_validation_plan(task, execution_result)
+        self.tasks.event(
+            task,
+            event_type="validation.plan_proposed",
+            stage=WorkflowStage.TESTS_RUN,
+            summary=f"Validation plan proposed by {self.coding_agent.provider.title()}",
+            details={"proposed_validation_plan": proposed_validation.model_dump()},
+            actor=self.coding_agent.provider,
+        )
+        try:
+            approved_validation = review_validation_plan(
+                proposed_validation,
+                changed_files=changed_files,
+                configured_commands=[
+                    command
+                    for command in (task.repository.lint_command, task.repository.test_command)
+                    if command
+                ],
+            )
+        except ValueError as exc:
+            task.failure_reason = str(exc)
+            self.state.transition(
+                task,
+                status=TaskStatus.FAILED,
+                stage=WorkflowStage.TESTS_RUN,
+                summary="Unsafe validation plan rejected by PatchPilot",
+                details={"error": str(exc), "proposed_validation_plan": proposed_validation.model_dump()},
+                event_type="validation.plan_rejected",
+                actor="policy",
+            )
+            return
+        self.tasks.event(
+            task,
+            event_type="validation.plan_approved",
+            stage=WorkflowStage.TESTS_RUN,
+            summary="PatchPilot broadened the validation plan" if approved_validation.broadened_by_policy else "PatchPilot approved the validation plan",
+            details={"approved_validation_plan": approved_validation.model_dump()},
+            actor="policy",
+        )
         self.state.transition(
             task,
             status=TaskStatus.VALIDATING,
             stage=WorkflowStage.TESTS_RUN,
             summary="Running configured validation",
         )
-        results = await self._validate(task, Path(task.workspace_path) if task.workspace_path else None)
+        results = await self._validate(task, approved_validation, Path(task.workspace_path) if task.workspace_path else None)
         final_by_command = {result["command"]: result for result in results}
         failed = any(result["exit_code"] != 0 for result in final_by_command.values())
         self.state.advance(
             task,
             stage=WorkflowStage.TESTS_RUN,
             summary="Validation failed" if failed else "Validation completed successfully",
-            details={"results": results, "simulated": all(item["simulated"] for item in results)},
+            details={
+                "proposed_validation_plan": proposed_validation.model_dump(),
+                "approved_validation_plan": approved_validation.model_dump(),
+                "commands_executed": [item["command"] for item in results],
+                "checks_skipped": [item.model_dump() for item in approved_validation.checks_skipped],
+                "rationale": approved_validation.rationale,
+                "results": results,
+                "retry_count": sum(1 for item in results if item.get("retried")),
+                "final_validation_result": "failed" if failed else "passed",
+                "simulated": bool(results) and all(item["simulated"] for item in results),
+            },
             event_type="validation.completed",
         )
         if failed:
@@ -550,11 +602,11 @@ class WorkflowOrchestrator:
         self.workspaces.cleanup(task.id)
         self.db.commit()
 
-    async def _validate(self, task: AgentTask, workspace: Path | None = None) -> list[dict]:
-        commands = [command for command in (task.repository.lint_command, task.repository.test_command) if command]
+    async def _validate(self, task: AgentTask, plan: ApprovedValidationPlan, workspace: Path | None = None) -> list[dict]:
+        commands = plan.commands_to_run
         checkout = workspace or self.settings.demo_repository_path
         if not commands:
-            commands = ["pytest -q"]
+            return []
         if not checkout or str(checkout).strip() in {"", "."} or not Path(checkout).is_dir():
             return [
                 {
@@ -584,6 +636,27 @@ class WorkflowOrchestrator:
                 if exit_code == 0:
                     break
         return results
+
+    def _proposed_validation_plan(
+        self, task: AgentTask, execution_result: AgentExecutionResult | None
+    ) -> ValidationPlan:
+        if execution_result and execution_result.validation_plan:
+            return execution_result.validation_plan
+        commands = [
+            command
+            for command in (task.repository.lint_command, task.repository.test_command)
+            if command
+        ]
+        if not commands:
+            commands = ["pytest -q"]
+        return ValidationPlan(
+            commands_to_run=commands,
+            checks_skipped=[],
+            rationale="Preserved configured repository validation for agents without validation-plan support.",
+            relevant_test_files=[],
+            validation_scope="full",
+            confidence="medium",
+        )
 
     def _agent_context(self, task: AgentTask, relevant_files: list[str] | None = None) -> AgentTaskContext:
         return AgentTaskContext(task_id=task.id, repository=task.repository.full_name, issue_number=task.github_issue_number, title=task.title, description=task.description, relevant_files=relevant_files or [], protected_paths=task.repository.protected_paths, checkpoint=task.last_checkpoint or {}, workspace_path=task.workspace_path, source_commit_sha=task.source_commit_sha, coding_guidelines=task.repository.coding_guidelines, test_command=task.repository.test_command, lint_command=task.repository.lint_command)
