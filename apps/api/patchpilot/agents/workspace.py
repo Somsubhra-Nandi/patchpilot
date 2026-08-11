@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import os
+import re
 import shutil
 import uuid
 from dataclasses import dataclass
@@ -9,6 +12,9 @@ from pathlib import Path
 
 class WorkspaceError(RuntimeError):
     pass
+
+
+BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,253}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +57,61 @@ class WorkspaceManager:
         stat = await self._run("git", "diff", "--stat", "HEAD", cwd=workspace)
         return lines, stat[-4000:]
 
+    async def publish_branch(
+        self,
+        path: Path,
+        *,
+        branch: str,
+        default_branch: str,
+        source_sha: str,
+        expected_files: list[str],
+        token: str,
+        commit_message: str,
+    ) -> str:
+        workspace = self._inside(path)
+        if not token:
+            raise WorkspaceError("GitHub publishing requires a token")
+        if (
+            not BRANCH_RE.fullmatch(branch)
+            or not BRANCH_RE.fullmatch(default_branch)
+            or branch.startswith("-")
+            or default_branch.startswith("-")
+            or ".." in branch
+            or ".." in default_branch
+        ):
+            raise WorkspaceError("Invalid task branch name")
+        if branch == default_branch:
+            raise WorkspaceError("Publishing to the default branch is forbidden")
+        current_branch = (await self._run("git", "branch", "--show-current", cwd=workspace)).strip()
+        if current_branch != branch:
+            raise WorkspaceError("Workspace is not on the expected task branch")
+        head = (await self._run("git", "rev-parse", "HEAD", cwd=workspace)).strip()
+        if not source_sha or head != source_sha:
+            raise WorkspaceError("Workspace HEAD no longer matches the known source commit")
+        actual_files = await self.changed_files(workspace)
+        if actual_files != sorted(set(expected_files)):
+            raise WorkspaceError("Workspace files changed after policy inspection")
+        if not actual_files:
+            raise WorkspaceError("There is no task diff to publish")
+        await self._run("git", "add", "--", *actual_files, cwd=workspace)
+        await self._run(
+            "git", "-c", "user.name=PatchPilot", "-c", "user.email=patchpilot@users.noreply.github.com",
+            "commit", "-m", commit_message, cwd=workspace,
+        )
+        commit_sha = (await self._run("git", "rev-parse", "HEAD", cwd=workspace)).strip()
+        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        git_env = os.environ.copy()
+        git_env.update({
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+            "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}",
+        })
+        await self._run(
+            "git", "push", "--porcelain", "origin", f"refs/heads/{branch}:refs/heads/{branch}",
+            cwd=workspace, env=git_env,
+        )
+        return commit_sha
+
     def cleanup(self, task_id: uuid.UUID) -> bool:
         path = self.path_for(task_id)
         if self.retain or not path.exists():
@@ -65,8 +126,8 @@ class WorkspaceManager:
         return resolved
 
     @staticmethod
-    async def _run(*argv: str, cwd: Path) -> str:
-        process = await asyncio.create_subprocess_exec(*argv, cwd=str(cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    async def _run(*argv: str, cwd: Path, env: dict[str, str] | None = None) -> str:
+        process = await asyncio.create_subprocess_exec(*argv, cwd=str(cwd), env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         output, _ = await process.communicate()
         text = output.decode(errors="replace")
         if process.returncode:

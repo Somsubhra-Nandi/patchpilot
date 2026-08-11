@@ -142,3 +142,46 @@ async def test_isolated_workspace_creation_and_cleanup(tmp_path):
     assert len(info.source_sha) == 40
     assert manager.cleanup(task_id) is True
     assert not info.path.exists()
+
+
+@pytest.mark.asyncio
+async def test_workspace_publishes_only_task_branch_with_real_diff(tmp_path):
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    source = tmp_path / "source-publish"
+    source.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=source, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=source, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=source, check=True)
+    (source / "value.txt").write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "add", "value.txt"], cwd=source, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=source, check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=source, check=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=source, check=True, capture_output=True)
+    task_id = uuid.uuid4()
+    manager = WorkspaceManager(tmp_path / "publish-workspaces", retain=True)
+    info = await manager.prepare(task_id, str(remote), "main")
+    await manager.create_branch(info.path, "patchpilot/task-1")
+    (info.path / "value.txt").write_text("two\n", encoding="utf-8")
+    commit = await manager.publish_branch(info.path, branch="patchpilot/task-1", default_branch="main", source_sha=info.source_sha, expected_files=["value.txt"], token="test-token", commit_message="fix: value")
+    refs = subprocess.run(["git", "for-each-ref", "--format=%(refname)", "refs/heads"], cwd=remote, check=True, capture_output=True, text=True).stdout
+    assert "refs/heads/patchpilot/task-1" in refs
+    assert subprocess.run(["git", "rev-parse", "refs/heads/main"], cwd=remote, check=True, capture_output=True, text=True).stdout.strip() == info.source_sha
+    assert len(commit) == 40
+
+
+@pytest.mark.asyncio
+async def test_workspace_refuses_default_branch_push(tmp_path):
+    manager = WorkspaceManager(tmp_path, retain=True)
+    repository = tmp_path / "repo-default"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repository, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repository, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repository, check=True)
+    (repository / "value.txt").write_text("one", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=repository, check=True, capture_output=True)
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repository, check=True, capture_output=True, text=True).stdout.strip()
+    (repository / "value.txt").write_text("two", encoding="utf-8")
+    with pytest.raises(Exception, match="default branch"):
+        await manager.publish_branch(repository, branch="main", default_branch="main", source_sha=sha, expected_files=["value.txt"], token="token", commit_message="fix")

@@ -108,6 +108,10 @@ export type Task = {
   assigned_maintainer: string | null;
   branch_name: string | null;
   pull_request_url: string | null;
+  pull_request_number: number | null;
+  published_commit_sha: string | null;
+  published_at: string | null;
+  publishing_status: string | null;
   failure_reason: string | null;
   coding_agent_provider: string | null;
   external_session_id: string | null;

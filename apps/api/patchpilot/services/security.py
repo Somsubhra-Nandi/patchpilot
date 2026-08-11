@@ -38,7 +38,13 @@ def parse_validation_command(command: str) -> list[str]:
     if any(token in command for token in ("&&", "||", ";", "|", ">", "<", "`", "$(")):
         raise ValueError("Shell control operators are not permitted in validation commands")
     argv = shlex.split(command, posix=True)
+    if argv and argv[0] == "git":
+        if len(argv) < 4 or argv[1:4] != ["diff", "--check", "--"]:
+            raise ValueError("Only git diff --check with explicit paths is permitted")
+        ensure_paths_allowed(argv[4:], [])
+        if not argv[4:] or any(path.startswith("-") for path in argv[4:]):
+            raise ValueError("git diff --check requires safe explicit paths")
+        return argv
     if not argv or argv[0] not in ALLOWED_EXECUTABLES:
         raise ValueError("Validation executable is not allowlisted")
     return argv
-

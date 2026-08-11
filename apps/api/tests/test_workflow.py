@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 from sqlalchemy import select
 
+from patchpilot.agents.coding import AgentExecutionResult, AgentReviewResult, ValidationPlan
 from patchpilot.core.config import Settings
-from patchpilot.models import Approval, ProcessedInboundMessage, Repository
+from patchpilot.github.client import GitHubError
+from patchpilot.models import AgentTask, Approval, ProcessedInboundMessage, Repository
+from patchpilot.models.enums import ApprovalStatus, TaskStatus, WorkflowStage
 from patchpilot.schemas.domain import DecisionRequest, InboundMessage, TaskCreate
 from patchpilot.services.commands import CommandService
 from patchpilot.workflows.orchestrator import WorkflowOrchestrator
@@ -30,9 +35,9 @@ class FakeGitHub:
             {"path": "README.md"},
         ]
 
-    async def create_proposal_draft_pr(self, **kwargs):
+    async def create_draft_pr(self, **kwargs):
         self.writes.append(kwargs)
-        return {"html_url": "https://github.com/octo/demo/pull/9"}
+        return {"html_url": "https://github.com/octo/demo/pull/9", "number": 9}
 
 
 class RecordingGateway:
@@ -45,6 +50,23 @@ class RecordingGateway:
 
     async def broadcast_task_update(self, task_id, text):
         self.broadcasts.append((task_id, text))
+
+
+class PublishingAgent:
+    provider = "codex"
+
+    async def implement(self, context):
+        workspace = __import__("pathlib").Path(context.workspace_path)
+        (workspace / "value.py").write_text("VALUE = 2\n", encoding="utf-8")
+        return AgentExecutionResult(status="completed", session_id="thread-publish", summary="Updated value", changed_files=["value.py"], validation_plan=ValidationPlan(commands_to_run=["ruff check value.py"], checks_skipped=[], rationale="Lint the changed Python module.", relevant_test_files=[], validation_scope="full", confidence="high"))
+
+    async def review(self, context):
+        return AgentReviewResult(status="completed", session_id="thread-publish", summary="Review complete")
+
+
+class FailingDraftGitHub(FakeGitHub):
+    async def create_draft_pr(self, **kwargs):
+        raise GitHubError("draft PR API unavailable")
 
 
 def configured_repository(db):
@@ -85,6 +107,7 @@ async def test_approval_from_different_channel_completes_demo_workflow(db):
     assert approval.responded_channel == "telegram"
     assert gateway.broadcasts
     assert any(event.event_type == "pull_request.prepared" for event in task.events)
+    assert task.publishing_status == "safe_mode"
 
 
 @pytest.mark.asyncio
@@ -119,7 +142,7 @@ async def test_duplicate_message_is_idempotent(db):
 
 
 @pytest.mark.asyncio
-async def test_github_write_waits_for_approval_and_creates_only_draft_proposal(db):
+async def test_github_write_rejects_non_isolated_fake_agent_publishing(db):
     repository = configured_repository(db)
     github = FakeGitHub()
     settings = Settings(github_write_enabled=True, patchpilot_demo_mode=True)
@@ -129,8 +152,74 @@ async def test_github_write_waits_for_approval_and_creates_only_draft_proposal(d
     )
     assert github.writes == []
     task = await workflow.approve(task, DecisionRequest(actor="maya", channel="telegram"))
+    assert task.status == "failed"
+    assert task.publishing_status == "failed"
+    assert task.pull_request_url is None
+    assert github.writes == []
+
+
+def publishing_task(db, tmp_path):
+    remote = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=seed, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=seed, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=seed, check=True)
+    (seed / "value.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=seed, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=seed, check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=seed, check=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=seed, check=True, capture_output=True)
+    repository = Repository(name="demo", owner="octo", full_name="octo/demo", github_url=str(remote), default_branch="main", test_command="ruff check value.py", protected_paths=[".github/workflows"])
+    db.add(repository)
+    db.flush()
+    task = AgentTask(repository_id=repository.id, github_issue_number=11, github_issue_url="https://github.com/octo/demo/issues/11", title="Update value", status=TaskStatus.APPROVED, current_stage=WorkflowStage.APPROVAL_RECEIVED, origin_channel="slack", origin_sender="maya", origin_conversation_id="thread-1", assigned_maintainer="maya", workspace_status="ready")
+    db.add(task)
+    db.flush()
+    approval = Approval(task_id=task.id, status=ApprovalStatus.APPROVED, requested_channel="slack", requested_from="maya", responded_channel="telegram", responded_by="maya")
+    db.add(approval)
+    db.commit()
+    workspace_root = tmp_path / "workspaces"
+    settings = Settings(github_write_enabled=True, github_token="test-token", patchpilot_demo_mode=True, agent_workspace_root=workspace_root, agent_workspace_retain=True)
+    return task, remote, settings
+
+
+@pytest.mark.asyncio
+async def test_write_mode_publishes_real_diff_and_persists_draft_pr(db, tmp_path):
+    task, remote, settings = publishing_task(db, tmp_path)
+    github = FakeGitHub()
+    gateway = RecordingGateway()
+    workflow = WorkflowOrchestrator(db, github=github, gateway=gateway, settings=settings, coding_agent=PublishingAgent())
+    info = await workflow.workspaces.prepare(task.id, str(remote), "main")
+    task.workspace_path = str(info.path)
+    task.source_commit_sha = info.source_sha
+    db.commit()
+    await workflow.implement(task)
+    assert task.status == "completed"
     assert task.pull_request_url == "https://github.com/octo/demo/pull/9"
-    assert len(github.writes) == 1
-    write = github.writes[0]
-    assert write["artifact_path"] == "patchpilot-proposals/issue-9.md"
-    assert write["base_branch"] == "main"
+    assert task.pull_request_number == 9
+    assert task.published_commit_sha and task.published_at
+    assert task.publishing_status == "published"
+    assert github.writes[0]["branch_name"] == task.branch_name
+    assert github.writes[0]["base_branch"] == "main"
+    assert "Validation plan" in github.writes[0]["body"]
+    assert any("Draft PR created: https://github.com/octo/demo/pull/9" in text for _, text in gateway.broadcasts)
+    db.expire(task, ["events"])
+    event_types = {event.event_type for event in task.events}
+    assert {"git.branch_created", "git.commit_created", "git.push_succeeded", "pull_request.created"} <= event_types
+
+
+@pytest.mark.asyncio
+async def test_github_api_failure_preserves_commit_and_marks_publish_failed(db, tmp_path):
+    task, remote, settings = publishing_task(db, tmp_path)
+    workflow = WorkflowOrchestrator(db, github=FailingDraftGitHub(), settings=settings, coding_agent=PublishingAgent())
+    info = await workflow.workspaces.prepare(task.id, str(remote), "main")
+    task.workspace_path = str(info.path)
+    task.source_commit_sha = info.source_sha
+    db.commit()
+    await workflow.implement(task)
+    assert task.status == "failed"
+    assert task.publishing_status == "failed"
+    assert task.published_commit_sha
+    assert task.pull_request_url is None

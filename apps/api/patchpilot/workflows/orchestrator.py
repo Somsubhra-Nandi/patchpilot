@@ -538,21 +538,40 @@ class WorkflowOrchestrator:
             stage=WorkflowStage.PULL_REQUEST_CREATED,
             summary="Preparing draft pull request",
         )
-        pr_payload = self._draft_pr_payload(task, changed_files, results)
+        pr_payload = self._draft_pr_payload(task, changed_files, results, proposed_validation, approved_validation)
         if self.settings.github_write_enabled:
-            artifact_path = f"patchpilot-proposals/issue-{task.github_issue_number}.md"
-            ensure_paths_allowed([artifact_path], task.repository.protected_paths)
+            task.publishing_status = "publishing"
             try:
-                pr = await self.github.create_proposal_draft_pr(
+                if self.coding_agent.provider != "codex" or not task.workspace_path:
+                    raise WorkspaceError("Real publishing requires the isolated Codex task workspace")
+                if not task.approvals or any(approval.status != ApprovalStatus.APPROVED for approval in task.approvals):
+                    raise WorkspaceError("All required approvals must be completed before publishing")
+                if any(decision.status == "pending" for decision in task.decisions):
+                    raise WorkspaceError("All required decisions must be resolved before publishing")
+                if not task.source_commit_sha:
+                    raise WorkspaceError("A known source commit is required before publishing")
+                validate_repository_identifier(task.repository.full_name)
+                ensure_paths_allowed(changed_files, task.repository.protected_paths)
+                self.tasks.event(task, event_type="git.branch_created", stage=WorkflowStage.PULL_REQUEST_CREATED, summary=f"Task branch created: {branch}", details={"branch": branch}, actor="patchpilot")
+                commit_sha = await self.workspaces.publish_branch(
+                    Path(task.workspace_path), branch=branch,
+                    default_branch=task.repository.default_branch,
+                    source_sha=task.source_commit_sha, expected_files=changed_files,
+                    token=self.settings.github_token or "",
+                    commit_message=f"fix: {task.title}",
+                )
+                task.published_commit_sha = commit_sha
+                self.tasks.event(task, event_type="git.commit_created", stage=WorkflowStage.PULL_REQUEST_CREATED, summary=f"Commit created: {commit_sha[:12]}", details={"branch": branch, "commit_sha": commit_sha, "changed_files": changed_files}, actor="patchpilot")
+                self.tasks.event(task, event_type="git.push_succeeded", stage=WorkflowStage.PULL_REQUEST_CREATED, summary=f"Task branch pushed: {branch}", details={"branch": branch, "commit_sha": commit_sha, "force": False}, actor="patchpilot")
+                pr = await self.github.create_draft_pr(
                     full_name=task.repository.full_name,
                     base_branch=task.repository.default_branch,
                     branch_name=branch,
-                    artifact_path=artifact_path,
-                    artifact_content=pr_payload["body"],
                     title=pr_payload["title"],
                     body=pr_payload["body"],
                 )
-            except GitHubError as exc:
+            except (GitHubError, WorkspaceError, ValueError) as exc:
+                task.publishing_status = "failed"
                 task.failure_reason = str(exc)
                 self.state.transition(
                     task,
@@ -563,6 +582,9 @@ class WorkflowOrchestrator:
                 )
                 return
             task.pull_request_url = pr.get("html_url")
+            task.pull_request_number = pr.get("number")
+            task.published_at = datetime.now(UTC)
+            task.publishing_status = "published"
             self.state.advance(
                 task,
                 stage=WorkflowStage.PULL_REQUEST_CREATED,
@@ -570,12 +592,14 @@ class WorkflowOrchestrator:
                 details={
                     "pull_request": pr_payload,
                     "url": task.pull_request_url,
-                    "artifact_path": artifact_path,
+                    "number": task.pull_request_number,
+                    "commit_sha": task.published_commit_sha,
                     "simulated": False,
                 },
                 event_type="pull_request.created",
             )
         else:
+            task.publishing_status = "safe_mode"
             self.state.advance(
                 task,
                 stage=WorkflowStage.PULL_REQUEST_CREATED,
@@ -593,11 +617,12 @@ class WorkflowOrchestrator:
                 "simulated": not bool(task.pull_request_url),
             },
         )
-        await self.gateway.broadcast_task_update(
-            task.id,
-            f"PatchPilot completed {task.repository.full_name}#{task.github_issue_number}. "
-            f"Validation passed; a safe draft PR payload is ready. Task: {task.id}",
+        final_message = (
+            f"Draft PR created: {task.pull_request_url}"
+            if task.pull_request_url
+            else f"PatchPilot completed {task.repository.full_name}#{task.github_issue_number}. Validation passed; a safe draft PR payload is ready. Task: {task.id}"
         )
+        await self.gateway.broadcast_task_update(task.id, final_message)
         task.workspace_status = "retained" if self.settings.agent_workspace_retain else "cleaned"
         self.workspaces.cleanup(task.id)
         self.db.commit()
@@ -674,15 +699,29 @@ class WorkflowOrchestrator:
         )
 
     @staticmethod
-    def _draft_pr_payload(task: AgentTask, changed_files: list[str], results: list[dict]) -> dict:
+    def _draft_pr_payload(task: AgentTask, changed_files: list[str], results: list[dict], proposed_validation, approved_validation) -> dict:
+        approvals = [f"- {approval.approval_type}: {approval.status} by {approval.responded_by or 'pending'} via {approval.responded_channel or approval.requested_channel}" for approval in task.approvals]
+        decisions = [f"- {decision.decision_type}: {decision.resolution or decision.status} by {decision.resolved_by or 'pending'}" for decision in task.decisions]
+        risks: list[str] = []
+        for event in reversed(task.events):
+            candidate = (event.details or {}).get("plan")
+            if candidate:
+                risks = candidate.get("risks", [])
+                break
         body = (
-            f"## Summary\nProposed bounded fix for #{task.github_issue_number}.\n\n"
+            f"## Related issue\n{task.github_issue_url}\n\n"
+            f"## Implementation summary\n{task.title}\n\n"
             f"## Changes\n" + "\n".join(f"- `{path}`" for path in changed_files) + "\n\n"
-            "## Validation\n"
+            "## Validation plan\n"
+            + f"Proposed ({proposed_validation.validation_scope}): {proposed_validation.rationale}\n"
+            + "\n".join(f"- `{command}`" for command in approved_validation.commands_to_run)
+            + "\n\n## Commands actually run\n"
+            + "\n".join(f"- `{item['command']}`" for item in results)
+            + "\n\n## Validation results\n"
             + "\n".join(f"- `{item['command']}`: exit {item['exit_code']}" for item in results)
-            + "\n\n## Risks\nGenerated in safe demo mode; review the proposed diff before applying."
-            "\n\n## Approval\nImplementation was explicitly approved by a maintainer."
-            "\n\n---\nPrepared by PatchPilot. Never auto-merged."
+            + "\n\n## Human approvals and decisions\n" + "\n".join([*approvals, *decisions] or ["- No additional decisions required."])
+            + "\n\n## Risks\n" + "\n".join(f"- {risk}" for risk in risks or ["No specific risks identified by Codex; maintainer review is still required."])
+            + "\n\n---\nPrepared by PatchPilot. Never auto-merged."
         )
         return {
             "title": f"Draft: {task.title}",

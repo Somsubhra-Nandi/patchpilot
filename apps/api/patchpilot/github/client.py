@@ -126,3 +126,16 @@ class GitHubClient:
                 "draft": True,
             },
         )
+
+    async def create_draft_pr(
+        self, *, full_name: str, base_branch: str, branch_name: str, title: str, body: str
+    ) -> dict[str, Any]:
+        if not self.token:
+            raise GitHubError("GITHUB_WRITE_ENABLED requires GITHUB_TOKEN")
+        if branch_name == base_branch:
+            raise GitHubError("Draft PR head cannot be the default branch")
+        return await self._request(
+            "POST",
+            f"/repos/{full_name}/pulls",
+            json={"title": title, "head": branch_name, "base": base_branch, "body": body, "draft": True},
+        )

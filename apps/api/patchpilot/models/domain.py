@@ -53,6 +53,10 @@ class AgentTask(Base, TimestampMixin):
     assigned_maintainer: Mapped[str | None] = mapped_column(String(512))
     branch_name: Mapped[str | None] = mapped_column(String(255))
     pull_request_url: Mapped[str | None] = mapped_column(String(1024))
+    pull_request_number: Mapped[int | None]
+    published_commit_sha: Mapped[str | None] = mapped_column(String(64))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    publishing_status: Mapped[str | None] = mapped_column(String(64), index=True)
     failure_reason: Mapped[str | None] = mapped_column(Text)
     coding_agent_provider: Mapped[str | None] = mapped_column(String(64))
     external_session_id: Mapped[str | None] = mapped_column(String(512), index=True)

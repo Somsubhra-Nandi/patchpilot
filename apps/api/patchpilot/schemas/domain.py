@@ -115,6 +115,10 @@ class TaskRead(ORMModel):
     assigned_maintainer: str | None
     branch_name: str | None
     pull_request_url: str | None
+    pull_request_number: int | None
+    published_commit_sha: str | None
+    published_at: datetime | None
+    publishing_status: str | None
     failure_reason: str | None
     coding_agent_provider: str | None
     external_session_id: str | None
