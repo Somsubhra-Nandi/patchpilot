@@ -1,14 +1,38 @@
 "use client";
 
-import { Bell, Bot, Boxes, LayoutDashboard, Radio, Settings2, ShieldCheck } from "lucide-react";
+import { Bell, Bot, Boxes, LayoutDashboard, Moon, Radio, Settings2, ShieldCheck, Sun } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 
 const links = [
   { href: "/dashboard", label: "Mission control", icon: LayoutDashboard },
   { href: "/repositories", label: "Repositories", icon: Boxes },
   { href: "/settings/channels", label: "Channel network", icon: Radio },
 ];
+
+function ThemeToggle() {
+  const [theme, setTheme] = useState<"light" | "dark">("light");
+
+  useEffect(() => {
+    const stored = (localStorage.getItem("patchpilot-theme") as "light" | "dark" | null) ?? "light";
+    setTheme(stored);
+    document.documentElement.setAttribute("data-theme", stored);
+  }, []);
+
+  function toggle() {
+    const next = theme === "light" ? "dark" : "light";
+    setTheme(next);
+    document.documentElement.setAttribute("data-theme", next);
+    localStorage.setItem("patchpilot-theme", next);
+  }
+
+  return (
+    <button className="theme-toggle" aria-label="Toggle dark mode" onClick={toggle}>
+      {theme === "light" ? <Moon size={16} /> : <Sun size={16} />}
+    </button>
+  );
+}
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -42,6 +66,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <header className="topbar">
           <div className="topbar-context"><Radio size={14} /> <span>Slack + Telegram</span><span>· unified by Caspian</span></div>
           <div className="topbar-actions">
+            <ThemeToggle />
             <button className="icon-button" aria-label="Notifications"><Bell size={17} /></button>
             <div className="avatar" aria-label="Signed in maintainer">MC</div>
           </div>

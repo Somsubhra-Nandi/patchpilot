@@ -23,6 +23,13 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `try{document.documentElement.setAttribute('data-theme', localStorage.getItem('patchpilot-theme') || 'light')}catch(e){}`,
+          }}
+        />
+      </head>
       <body><Providers><AppShell>{children}</AppShell></Providers></body>
     </html>
   );

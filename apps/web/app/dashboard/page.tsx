@@ -1,8 +1,11 @@
+
+
 "use client";
 
 import { Activity, AlertTriangle, CheckCircle2, CircleDot, Radio, Rocket, Workflow } from "lucide-react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
+import { AnimatedCounter } from "@/components/animated-counter";
 import { MissionCard } from "@/components/mission-card";
 import { api } from "@/lib/api";
 
@@ -37,7 +40,7 @@ export default function DashboardPage() {
         <Link href="/repositories" className="button button-primary">Configure repository</Link>
       </div>
       <section className="metric-grid" aria-label="Workflow summary">
-        {metrics.map(([label, value, helper, Icon]) => <article className="metric" key={label}><div className="metric-top"><span>{label}</span><span className="metric-icon"><Icon size={16} /></span></div><strong>{value.toString().padStart(2, "0")}</strong><small>{helper}</small></article>)}
+        {metrics.map(([label, value, helper, Icon], i) => <article className="metric" style={{ animationDelay: `${i * 70}ms` }} key={label}><div className="metric-top"><span>{label}</span><span className="metric-icon"><Icon size={16} /></span></div><strong><AnimatedCounter value={value} /></strong><small>{helper}</small></article>)}
       </section>
       <section className="panel" style={{ marginBottom: 18 }} aria-label="Needs attention"><div className="panel-header"><h2>Needs attention</h2><span className="badge badge-amber">{decisions.data?.length || 0} pending</span></div>{decisions.data?.length ? <div className="mission-list">{decisions.data.map((decision) => { const task = items.find((item) => item.id === decision.task_id); return <Link href={`/tasks/${decision.task_id}`} className="mission-card" key={decision.id}><div className="mission-top"><span className="badge badge-red">{decision.risk_level} risk</span><span className="badge badge-neutral">{decision.requested_by_agent}</span></div><h3>{decision.title}</h3><p>{task?.repository.full_name || "Repository"} · Task {decision.task_id.slice(0, 8)} · {decision.decision_type.replaceAll("_", " ")}</p><small>Recommendation: {decision.recommended_option || "maintainer judgment"} · requested {new Date(decision.created_at).toLocaleString()}</small></Link>})}</div> : <div className="empty"><CheckCircle2 /><h3>No decisions pending</h3><p>Agents are operating within approved policy bounds.</p></div>}</section>
       <div className="dashboard-grid">
