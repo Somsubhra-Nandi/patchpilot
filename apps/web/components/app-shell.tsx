@@ -3,7 +3,7 @@
 import { Bell, Bot, Boxes, LayoutDashboard, Moon, Radio, Settings2, ShieldCheck, Sun } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 const links = [
   { href: "/dashboard", label: "Mission control", icon: LayoutDashboard },
@@ -11,14 +11,13 @@ const links = [
   { href: "/settings/channels", label: "Channel network", icon: Radio },
 ];
 
-function ThemeToggle() {
-  const [theme, setTheme] = useState<"light" | "dark">("light");
+function getInitialTheme(): "light" | "dark" {
+  if (typeof window === "undefined") return "light";
+  return (localStorage.getItem("patchpilot-theme") as "light" | "dark" | null) ?? "light";
+}
 
-  useEffect(() => {
-    const stored = (localStorage.getItem("patchpilot-theme") as "light" | "dark" | null) ?? "light";
-    setTheme(stored);
-    document.documentElement.setAttribute("data-theme", stored);
-  }, []);
+function ThemeToggle() {
+  const [theme, setTheme] = useState<"light" | "dark">(getInitialTheme);
 
   function toggle() {
     const next = theme === "light" ? "dark" : "light";
