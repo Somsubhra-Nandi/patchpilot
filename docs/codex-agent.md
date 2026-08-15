@@ -25,4 +25,6 @@ Set `AGENT_WORKSPACE_RETAIN=false` to remove completed task workspaces. Cleanup 
 
 ## Current GitHub write behavior
 
-Safe mode preserves the complete local Codex diff and prepares a draft-PR payload without pushing. The existing guarded write mode still creates a new task branch and draft PR through the GitHub API, never force-pushes, never updates the default branch, and never merges. Its current remote artifact is the PatchPilot proposal document; publishing the complete local Git tree through the GitHub Git Data API remains a deliberate follow-up before enabling real-diff write mode in production.
+With `GITHUB_WRITE_ENABLED=false`, PatchPilot retains the real local Codex diff, validates it, and prepares PR information without pushing or creating a PR. With write mode enabled and all gates satisfied, PatchPilot verifies the source commit and isolated workspace, checks changed and protected paths, creates a task branch, commits and pushes the real diff, and creates a GitHub draft PR. It never force-pushes, updates the default branch, or merges.
+
+Codex proposes engineering actions and repository-aware validation plans. PatchPilot remains authoritative for policy, human escalation, command safety, validation acceptance, audit evidence, and GitHub publishing.

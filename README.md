@@ -2,7 +2,7 @@
 
 > Assign an issue from Slack. Approve the plan from Telegram. Receive a tested draft pull request on GitHub.
 
-PatchPilot is a traceable open-source maintainer agent built for the **Caspian AI Agent Hackathon**. It turns a GitHub issue into a durable engineering workflow: repository analysis, a structured implementation plan, explicit human approval, a bounded patch, validation evidence, and a draft pull request or safe draft-PR payload.
+PatchPilot is the human coordination and safety layer for autonomous coding agents. It lets agents such as Codex work on real GitHub tasks while PatchPilot handles approvals, risk escalation, cross-channel human decisions, validation governance, audit history, and guarded PR publishing through Caspian-powered Slack and Telegram communication.
 
 PatchPilot is deliberately not a generic chatbot. Every decision is represented as a stage, event, approval, artifact, or outcome in the maintainer control center.
 
@@ -41,9 +41,9 @@ flowchart LR
 - GitHub issue, comment, repository metadata, and tree ingestion through the REST API.
 - Heuristic file ranking and a validated structured implementation plan.
 - Cross-channel approval with duplicate-message and duplicate-decision safeguards.
-- Safe demo artifacts and visibly simulated validation/PR results.
+- Credential-free fake-agent fallback with visibly labeled simulated evidence.
 - Optional real validation using allowlisted, argument-vector execution without a shell.
-- Opt-in GitHub write mode that creates a new proposal branch, commits a generated artifact, and opens a draft PR. It never merges, force-pushes, or writes to the base branch.
+- Opt-in GitHub write mode that publishes the real Codex-generated diff on a task branch and opens a draft PR. It never merges, force-pushes, or writes to the base branch.
 - FastAPI API, PostgreSQL persistence, Alembic migration, pagination, filtering, and SSE.
 - Responsive Next.js maintainer console with dashboard, live task detail, repository policy, and channel configuration.
 - Seeded completed, awaiting-approval, and failed missions.
@@ -143,7 +143,7 @@ Task prefixes must resolve uniquely. Deterministic commands do not depend on an 
 
 ### Safe demo mode
 
-Always available. PatchPilot creates structured proposed diffs, simulated validation when no checkout is mounted, and a complete draft-PR payload. Every simulated result is labeled in the UI and event details.
+Always available. PatchPilot creates structured plans and preserves local changes. Without a real checkout, validation and publishing are represented as clearly labeled safe-mode evidence.
 
 ### Write mode
 
@@ -155,7 +155,7 @@ GITHUB_WRITE_ENABLED=true
 GITHUB_TOKEN=github_pat_...
 ```
 
-The prototype creates `patchpilot/issue-<number>-<task>` from the configured base, commits `patchpilot-proposals/issue-<number>.md`, and opens a draft PR. This proposal artifact makes the write path safe and auditable; applying arbitrary generated source edits remains a documented extension point.
+PatchPilot verifies the known source commit and isolated workspace, enforces protected paths, creates `patchpilot/issue-<number>-<task>`, commits the actual Codex-generated diff, pushes only that task branch, and opens a GitHub draft PR. It persists PR metadata and notifies maintainers. It never merges, force-pushes, or writes the default branch.
 
 ## Environment reference
 
@@ -251,10 +251,10 @@ Makefile
 
 ## Current prototype boundaries
 
-- External Caspian, GitHub, and LLM credentials were not supplied, so live channel delivery and GitHub writes are implemented but not claimed as credential-tested here.
+- Live Caspian, Codex, and GitHub behavior is documented from the verified end-to-end demo; credential-free fake-agent mode remains the reproducible fallback.
 - Safe demo mode, deterministic planning, persistence, API, SSE, and console behavior are covered by automated tests.
 - Real validation requires a mounted checkout at `DEMO_REPOSITORY_PATH` and repository-configured commands.
-- The optional GitHub write path commits a proposal artifact rather than applying arbitrary model-generated source edits. This is an intentional safety boundary for the hackathon prototype.
+- The optional GitHub write path commits the actual Codex-generated diff only after workspace, policy, approval, and validation gates pass.
 - Publishing the repository and recording the demo video are submission-owner actions.
 
 ## Hackathon submission checklist

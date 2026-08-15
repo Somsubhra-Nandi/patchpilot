@@ -620,7 +620,7 @@ class WorkflowOrchestrator:
         final_message = (
             f"Draft PR created: {task.pull_request_url}"
             if task.pull_request_url
-            else f"PatchPilot completed {task.repository.full_name}#{task.github_issue_number}. Validation passed; a safe draft PR payload is ready. Task: {task.id}"
+            else f"PatchPilot completed {task.repository.full_name}#{task.github_issue_number}. Validation passed; PR information is ready locally (write mode is disabled). Task: {task.id}"
         )
         await self.gateway.broadcast_task_update(task.id, final_message)
         task.workspace_status = "retained" if self.settings.agent_workspace_retain else "cleaned"

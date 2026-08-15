@@ -27,7 +27,7 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 # Keep the declared test/lint toolchain available for Compose verification.
 COPY --from=deps --chown=nextjs:nodejs /app/node_modules ./node_modules
-COPY --chown=nextjs:nodejs package.json tsconfig.json eslint.config.mjs vitest.config.ts vitest.setup.ts test-utils.tsx ./
+COPY --chown=nextjs:nodejs package.json tsconfig.json next-env.d.ts next.config.ts eslint.config.mjs vitest.config.ts vitest.setup.ts test-utils.tsx ./
 COPY --chown=nextjs:nodejs app ./app
 COPY --chown=nextjs:nodejs components ./components
 COPY --chown=nextjs:nodejs lib ./lib

@@ -27,9 +27,12 @@ services:
       SEED_DEMO_DATA: "true"
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITHUB_WRITE_ENABLED: ${GITHUB_WRITE_ENABLED:-false}
-    # Codex uses bubblewrap to enforce its workspace sandbox; Docker's default
+    # Hackathon/development execution configuration: Codex uses bubblewrap to
+    # enforce its workspace sandbox; Docker's default
     # seccomp profile blocks the user-namespace syscall bubblewrap requires.
     security_opt:
+      # This is required by the nested Codex sandbox setup. Codex sandbox
+      # bypass is not enabled; do not treat this as production hardening.
       - seccomp=unconfined
     cap_add:
       - SYS_ADMIN

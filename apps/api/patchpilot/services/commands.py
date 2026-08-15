@@ -26,6 +26,7 @@ class Command:
 
 
 START_RE = re.compile(r"^(?:(?:/patchpilot|patchpilot)\s+start\s+|analy[sz]e\s+issue\s+)([\w.-]+/[\w.-]+)#?(\d+)(?:\s+in\s+([\w.-]+/[\w.-]+))?$", re.I)
+LEADING_SLACK_MENTION_RE = re.compile(r"^<@[A-Z0-9]+>\s*", re.I)
 NL_START_RE = re.compile(r"^analy[sz]e\s+issue\s+(\d+)\s+in\s+([\w.-]+/[\w.-]+)$", re.I)
 ACTION_RE = re.compile(
     r"^(?:/patchpilot\s+|patchpilot\s+)?(status|approve|reject|cancel|pause|resume|explain)\s+([0-9a-f-]{6,36})(?:\s+(.+))?$",
@@ -37,6 +38,8 @@ NL_STATUS_RE = re.compile(r"^what is the status of task\s+([0-9a-f-]{6,36})\??$"
 
 def parse_command(text: str) -> Command:
     cleaned = " ".join(text.strip().split())
+    # Remove only a leading Slack app mention; mentions in arguments are data.
+    cleaned = LEADING_SLACK_MENTION_RE.sub("", cleaned, count=1).strip()
     if cleaned.lower() in {"/patchpilot", "/patchpilot help", "help", "patchpilot help"}:
         return Command("help")
     if cleaned.lower() in {"/patchpilot decisions", "patchpilot decisions", "decisions"}:

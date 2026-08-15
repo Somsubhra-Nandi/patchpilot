@@ -59,15 +59,15 @@ Point at the approval gate changing and the audit event identifying Telegram.
 
 Show the timeline update via SSE:
 
-- Branch prepared.
-- Safe patch generated.
+- Isolated workspace prepared.
+- Real Codex change generated.
 - Protected paths checked.
 - Validation run or simulated.
-- Draft PR payload prepared.
+- Draft PR prepared (or safe-mode PR information when writes are disabled).
 
-Point out every “simulated” badge if running without a checkout or GitHub write credentials.
+Point out every “simulated” badge only when using the credential-free fallback or when no checkout is mounted.
 
-Say: “We never imply a simulated effect is real. In write mode the same approval can create a new branch and draft PR, but it still cannot merge or force-push.”
+Say: “In write mode PatchPilot commits the real Codex diff to a new task branch and creates a draft PR, but it still cannot merge or force-push.”
 
 ## 3:35–4:15 — Show validation evidence and PR
 

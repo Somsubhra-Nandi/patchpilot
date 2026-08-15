@@ -134,7 +134,7 @@ The GitHub reader fetches issue title/body/labels/comments and repository metada
 - Requires explicit `GITHUB_WRITE_ENABLED=true`, a token, and prior approval.
 - Resolves the configured base ref.
 - Creates a new branch; it never updates or force-pushes an existing ref.
-- Commits one generated proposal artifact outside protected paths.
+- Commits the actual Codex-generated diff after changed-file and protected-path checks.
 - Creates a draft PR.
 - Never merges.
 

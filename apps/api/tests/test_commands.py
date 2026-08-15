@@ -24,7 +24,16 @@ def test_reject_requires_reason_is_preserved():
     assert command.reason == "scope is too large"
 
 
+def test_leading_slack_app_mention_is_ignored():
+    assert parse_command("<@U123456> patchpilot help").name == "help"
+
+
+def test_slack_app_mention_inside_argument_is_preserved():
+    command = parse_command("patchpilot reject abc123 <@U123456> review needed")
+    assert command.name == "reject"
+    assert command.reason == "<@U123456> review needed"
+
+
 def test_unsupported_command_is_clear():
     with pytest.raises(CommandError, match="Unsupported command"):
         parse_command("write me a poem")
-

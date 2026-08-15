@@ -89,7 +89,7 @@ class GitHubClient:
         title: str,
         body: str,
     ) -> dict[str, Any]:
-        """Create a new branch, commit one generated proposal artifact, and open a draft PR.
+        """Create a new branch, commit a generated artifact, and open a draft PR.
 
         This never updates an existing ref, force-pushes, merges, or writes to the base branch.
         """
