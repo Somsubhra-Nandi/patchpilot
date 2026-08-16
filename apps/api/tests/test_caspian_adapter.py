@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from patchpilot.caspian.adapter import normalize_caspian_message
+from patchpilot.caspian.adapter import CaspianGateway, normalize_caspian_message
 
 
 @dataclass
@@ -29,3 +29,52 @@ def test_rejects_unsupported_channel():
     with pytest.raises(ValueError, match="Unsupported"):
         normalize_caspian_message(FakeMessage(channel="email"))
 
+
+def test_prefers_latest_active_connection_over_stale_pending_oauth():
+    selected = CaspianGateway._select_connection(
+        [
+            {
+                "id": "active-old",
+                "channel": "slack",
+                "status": "active",
+                "created_at": "2026-08-09T15:42:00",
+            },
+            {
+                "id": "active-current",
+                "channel": "slack",
+                "status": "active",
+                "created_at": "2026-08-09T15:47:00",
+            },
+            {
+                "id": "pending-newer",
+                "channel": "slack",
+                "status": "pending_oauth",
+                "created_at": "2026-08-11T16:00:00",
+            },
+        ],
+        "slack",
+    )
+
+    assert selected and selected["id"] == "active-current"
+
+
+def test_reuses_pending_connection_instead_of_creating_another():
+    selected = CaspianGateway._select_connection(
+        [
+            {
+                "id": "pending-current",
+                "channel": "slack",
+                "status": "pending_oauth",
+                "created_at": "2026-08-11T16:00:00",
+            },
+            {
+                "id": "failed-old",
+                "channel": "slack",
+                "status": "failed",
+                "created_at": "2026-08-11T15:00:00",
+            },
+        ],
+        "slack",
+    )
+
+    assert selected and selected["id"] == "pending-current"

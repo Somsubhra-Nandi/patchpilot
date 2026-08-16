@@ -65,17 +65,47 @@ class CaspianGateway:
             api_key=self.settings.caspian_api_key,
             base_url=self.settings.caspian_base_url,
         )
+        remote_connections = self.client.list_connections()
+        logger.info(
+            "caspian_remote_connections_loaded", count=len(remote_connections)
+        )
         configured = 0
-        if self.settings.caspian_telegram_bot_token:
+        telegram = self._select_connection(remote_connections, "telegram")
+        if telegram:
+            telegram = self._connection_details(telegram)
+            self._save_connection("telegram", "PatchPilot Telegram", telegram)
+            logger.info(
+                "caspian_connection_reused",
+                channel="telegram",
+                connection_id=telegram.get("id"),
+                status=telegram.get("status"),
+            )
+            configured += 1
+        elif self.settings.caspian_telegram_bot_token:
             result = self.client.connect_telegram(
                 bot_token=self.settings.caspian_telegram_bot_token
             )
             self._save_connection("telegram", "PatchPilot Telegram", result)
             configured += 1
-        result = self._configure_slack()
-        if result:
-            self._save_connection("slack", self.settings.caspian_slack_display_name, result)
+
+        slack = self._select_connection(remote_connections, "slack")
+        if slack:
+            slack = self._connection_details(slack)
+            self._save_connection("slack", self.settings.caspian_slack_display_name, slack)
+            logger.info(
+                "caspian_connection_reused",
+                channel="slack",
+                connection_id=slack.get("id"),
+                status=slack.get("status"),
+            )
             configured += 1
+        else:
+            result = self._configure_slack()
+            if result:
+                self._save_connection(
+                    "slack", self.settings.caspian_slack_display_name, result
+                )
+                configured += 1
         if configured < 2:
             logger.warning("caspian_less_than_two_channels", configured=configured)
 
@@ -86,10 +116,91 @@ class CaspianGateway:
             except ValueError as exc:
                 logger.warning("caspian_message_rejected", reason=str(exc))
                 return
+            logger.info(
+                "caspian_message_received",
+                channel=inbound.channel,
+                message_id=inbound.message_id,
+                connection_id=inbound.connection_id,
+            )
             with SessionLocal() as db:
                 response = asyncio.run(CommandService(db, self).process(inbound))
             if response:
-                message.reply(response)
+                logger.info(
+                    "caspian_handler_dispatched",
+                    channel=inbound.channel,
+                    message_id=inbound.message_id,
+                )
+                try:
+                    message.reply(response)
+                except Exception:
+                    logger.exception(
+                        "caspian_reply_failed",
+                        channel=inbound.channel,
+                        message_id=inbound.message_id,
+                        connection_id=inbound.connection_id,
+                    )
+                    raise
+                logger.info(
+                    "caspian_reply_succeeded",
+                    channel=inbound.channel,
+                    message_id=inbound.message_id,
+                    connection_id=inbound.connection_id,
+                )
+
+    @staticmethod
+    def _select_connection(connections: list[dict], channel: str) -> dict | None:
+        """Choose one current remote connection without creating duplicates."""
+        priority = {
+            "active": 4,
+            "pending_oauth": 3,
+            "provisioning": 2,
+            "failed": 1,
+            "disconnected": 0,
+        }
+        matches = [item for item in connections if item.get("channel") == channel]
+        if not matches:
+            return None
+        return max(
+            matches,
+            key=lambda item: (
+                priority.get(str(item.get("status")), -1),
+                str(item.get("created_at") or ""),
+            ),
+        )
+
+    def _connection_details(self, connection: dict) -> dict:
+        if not self.client or not connection.get("id"):
+            return connection
+        try:
+            return self.client.get_connection(connection["id"])
+        except Exception:
+            logger.warning(
+                "caspian_connection_detail_failed",
+                connection_id=connection.get("id"),
+                exc_info=True,
+            )
+            return connection
+
+    def sync_connections(self) -> None:
+        """Refresh local channel rows from the current Caspian project state."""
+        if not self.client:
+            return
+        remote_connections = self.client.list_connections()
+        for channel, display_name in (
+            ("telegram", "PatchPilot Telegram"),
+            ("slack", self.settings.caspian_slack_display_name),
+        ):
+            selected = self._select_connection(remote_connections, channel)
+            if selected:
+                self._save_connection(
+                    channel, display_name, self._connection_details(selected)
+                )
+            else:
+                self._save_connection(
+                    channel,
+                    display_name,
+                    {"id": None, "status": "disconnected", "provider": "caspian_hosted"},
+                )
 
     def _configure_slack(self) -> dict | None:
         if self.settings.caspian_slack_mode == "quick":
@@ -122,10 +233,15 @@ class CaspianGateway:
                 select(ChannelConnection).where(ChannelConnection.channel_type == channel)
             ) or ChannelConnection(channel_type=channel, display_name=display_name)
             connection.display_name = display_name
-            connection.status = result.get("status", "configured")
+            status = str(result.get("status") or "disconnected")
+            connection.status = {
+                "active": "active",
+                "pending_oauth": "pending_oauth",
+                "failed": "failed",
+            }.get(status, "disconnected")
             connection.external_connection_id = result.get("id")
             connection.configuration_summary = {
-                "provider": result.get("provider", "caspian_hosted"),
+                "provider": result.get("provider") or "caspian_hosted",
                 "address": result.get("address"),
                 "authorization_required": bool(result.get("authorize_url")),
                 "authorize_url": result.get("authorize_url"),
@@ -137,13 +253,23 @@ class CaspianGateway:
         self.configure()
         if not self.client or not self.settings.caspian_start_listener:
             return
+        if self._listener_thread and self._listener_thread.is_alive():
+            logger.info("caspian_listener_already_running")
+            return
         self._listener_thread = threading.Thread(
-            target=self.client.listen,
-            kwargs={"concurrency": "queue"},
+            target=self._listen,
             daemon=True,
             name="caspian-listener",
         )
         self._listener_thread.start()
+        logger.info("caspian_listener_thread_started")
+
+    def _listen(self) -> None:
+        logger.info("caspian_listener_started")
+        try:
+            self.client.listen(concurrency="queue")
+        except Exception:
+            logger.exception("caspian_listener_stopped_unexpectedly")
 
     async def send_message(self, channel: str, conversation_id: str, text: str) -> None:
         if not self.client:
