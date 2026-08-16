@@ -31,7 +31,11 @@ from patchpilot.services.security import (
     parse_validation_command,
     validate_repository_identifier,
 )
-from patchpilot.services.validation import ApprovedValidationPlan, review_validation_plan
+from patchpilot.services.validation import (
+    ApprovedValidationPlan,
+    classify_validation_failure,
+    review_validation_plan,
+)
 from patchpilot.workflows.state import InvalidTransition, WorkflowStateService
 
 
@@ -466,14 +470,17 @@ class WorkflowOrchestrator:
             actor=self.coding_agent.provider,
         )
         try:
+            validation_workspace = Path(task.workspace_path) if task.workspace_path else None
+            configured_validation = [
+                command
+                for command in (task.repository.lint_command, task.repository.test_command)
+                if command
+            ]
             approved_validation = review_validation_plan(
                 proposed_validation,
                 changed_files=changed_files,
-                configured_commands=[
-                    command
-                    for command in (task.repository.lint_command, task.repository.test_command)
-                    if command
-                ],
+                configured_commands=configured_validation,
+                workspace=validation_workspace,
             )
         except ValueError as exc:
             task.failure_reason = str(exc)
@@ -501,13 +508,29 @@ class WorkflowOrchestrator:
             stage=WorkflowStage.TESTS_RUN,
             summary="Running configured validation",
         )
-        results = await self._validate(task, approved_validation, Path(task.workspace_path) if task.workspace_path else None)
+        results = await self._validate(
+            task,
+            approved_validation,
+            validation_workspace,
+            changed_files=changed_files,
+            configured_commands=configured_validation,
+        )
         final_by_command = {result["command"]: result for result in results}
-        failed = any(result["exit_code"] != 0 for result in final_by_command.values())
+        failed = any(
+            result["exit_code"] != 0 and not result.get("superseded_by_replan")
+            for result in final_by_command.values()
+        )
+        skipped = not approved_validation.commands_to_run and not results
         self.state.advance(
             task,
             stage=WorkflowStage.TESTS_RUN,
-            summary="Validation failed" if failed else "Validation completed successfully",
+            summary=(
+                "Validation failed"
+                if failed
+                else "Automated validation skipped with repository evidence"
+                if skipped
+                else "Validation completed successfully"
+            ),
             details={
                 "proposed_validation_plan": proposed_validation.model_dump(),
                 "approved_validation_plan": approved_validation.model_dump(),
@@ -516,7 +539,7 @@ class WorkflowOrchestrator:
                 "rationale": approved_validation.rationale,
                 "results": results,
                 "retry_count": sum(1 for item in results if item.get("retried")),
-                "final_validation_result": "failed" if failed else "passed",
+                "final_validation_result": "failed" if failed else "skipped" if skipped else "passed",
                 "simulated": bool(results) and all(item["simulated"] for item in results),
             },
             event_type="validation.completed",
@@ -627,7 +650,15 @@ class WorkflowOrchestrator:
         self.workspaces.cleanup(task.id)
         self.db.commit()
 
-    async def _validate(self, task: AgentTask, plan: ApprovedValidationPlan, workspace: Path | None = None) -> list[dict]:
+    async def _validate(
+        self,
+        task: AgentTask,
+        plan: ApprovedValidationPlan,
+        workspace: Path | None = None,
+        *,
+        changed_files: list[str] | None = None,
+        configured_commands: list[str] | None = None,
+    ) -> list[dict]:
         commands = plan.commands_to_run
         checkout = workspace or self.settings.demo_repository_path
         if not commands:
@@ -643,24 +674,173 @@ class WorkflowOrchestrator:
                 }
                 for command in commands
             ]
-        results = []
-        for command in commands:
+        results: list[dict] = []
+        command_queue = list(commands)
+        nonretryable_commands: set[str] = set()
+        changed_files = changed_files or []
+        configured_commands = configured_commands or []
+        max_replans = max(1, self.settings.agent_validation_max_attempts)
+        replans = 0
+        command_index = 0
+        while command_index < len(command_queue):
+            command = command_queue[command_index]
+            command_index += 1
             argv = parse_validation_command(command)
             attempts = self.settings.agent_validation_max_attempts if workspace else 1
             for attempt in range(1, attempts + 1):
                 started = time.perf_counter()
-                process = await asyncio.create_subprocess_exec(*argv, cwd=str(checkout), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-                try:
-                    output, _ = await asyncio.wait_for(process.communicate(), timeout=120)
-                except TimeoutError:
-                    process.kill()
-                    await process.wait()
-                    output = b"Validation timed out after 120 seconds"
-                exit_code = process.returncode if process.returncode is not None else 124
-                results.append({"command": command, "exit_code": exit_code, "duration_ms": int((time.perf_counter() - started) * 1000), "output_summary": output.decode(errors="replace")[-4000:], "simulated": False, "attempt": attempt, "retried": attempt > 1})
+                exit_code, output_summary, executable_missing = await self._run_validation_command(
+                    argv, Path(checkout)
+                )
+                classification = (
+                    None
+                    if exit_code == 0
+                    else classify_validation_failure(
+                        exit_code=exit_code,
+                        output=output_summary,
+                        executable_missing=executable_missing,
+                    )
+                )
+                result = {
+                    "command": command,
+                    "exit_code": exit_code,
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                    "output_summary": output_summary[-4000:],
+                    "simulated": False,
+                    "attempt": attempt,
+                    "retried": attempt > 1,
+                    "failure_classification": classification,
+                }
+                results.append(result)
                 if exit_code == 0:
                     break
+                if classification == "infrastructure_error" and attempt < attempts:
+                    continue
+
+                repair = await self._repair_validation_failure(
+                    task,
+                    command=command,
+                    classification=classification or "unknown",
+                    output_summary=output_summary,
+                    workspace=workspace,
+                    changed_files=changed_files,
+                )
+                if classification == "test_failure" and repair and attempt < attempts:
+                    continue
+
+                if classification in {
+                    "command_not_found",
+                    "invalid_test_target",
+                    "missing_dependency",
+                    "configuration_error",
+                }:
+                    nonretryable_commands.add(command)
+                    if repair and repair.validation_plan and replans < max_replans:
+                        corrected = review_validation_plan(
+                            repair.validation_plan,
+                            changed_files=changed_files,
+                            configured_commands=configured_commands,
+                            workspace=workspace,
+                        )
+                        result["replacement_validation_plan"] = corrected.model_dump()
+                        replacements_added = False
+                        for replacement in corrected.commands_to_run:
+                            if (
+                                replacement not in nonretryable_commands
+                                and replacement not in command_queue
+                            ):
+                                command_queue.append(replacement)
+                                replacements_added = True
+                        if replacements_added:
+                            result["superseded_by_replan"] = True
+                        replans += 1
+                break
         return results
+
+    async def _run_validation_command(
+        self, argv: list[str], checkout: Path
+    ) -> tuple[int, str, bool]:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=str(checkout),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        except FileNotFoundError:
+            return 127, f"Validation executable is unavailable: {argv[0]}", True
+        try:
+            output, _ = await asyncio.wait_for(process.communicate(), timeout=120)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            return 124, "Validation timed out after 120 seconds", False
+        return (
+            process.returncode if process.returncode is not None else 124,
+            output.decode(errors="replace"),
+            False,
+        )
+
+    async def _repair_validation_failure(
+        self,
+        task: AgentTask,
+        *,
+        command: str,
+        classification: str,
+        output_summary: str,
+        workspace: Path | None,
+        changed_files: list[str],
+    ) -> AgentExecutionResult | None:
+        repair = getattr(self.coding_agent, "repair_validation", None)
+        if self.coding_agent.provider != "codex" or not repair or not task.external_session_id:
+            return None
+        try:
+            result = await repair(
+                task.external_session_id,
+                command=command,
+                failure_classification=classification,
+                output_summary=output_summary,
+            )
+        except Exception as exc:
+            self.tasks.event(
+                task,
+                event_type="validation.repair_failed",
+                stage=WorkflowStage.TESTS_RUN,
+                summary="Codex could not propose a validation repair",
+                details={"command": command, "classification": classification, "error": str(exc)},
+                actor="codex",
+            )
+            return None
+        if result.status != "completed":
+            return None
+        if workspace:
+            actual_files = await self.workspaces.changed_files(workspace)
+            ensure_paths_allowed(actual_files, task.repository.protected_paths)
+            if not set(actual_files).issubset(changed_files):
+                self.tasks.event(
+                    task,
+                    event_type="validation.repair_rejected",
+                    stage=WorkflowStage.TESTS_RUN,
+                    summary="Validation repair changed files outside the approved scope",
+                    details={"unexpected_files": sorted(set(actual_files) - set(changed_files))},
+                    actor="policy",
+                )
+                return None
+        self.tasks.event(
+            task,
+            event_type="validation.repair_proposed",
+            stage=WorkflowStage.TESTS_RUN,
+            summary="Codex responded to classified validation evidence",
+            details={
+                "command": command,
+                "classification": classification,
+                "replacement_validation_plan": (
+                    result.validation_plan.model_dump() if result.validation_plan else None
+                ),
+            },
+            actor="codex",
+        )
+        return result
 
     def _proposed_validation_plan(
         self, task: AgentTask, execution_result: AgentExecutionResult | None
@@ -672,14 +852,25 @@ class WorkflowOrchestrator:
             for command in (task.repository.lint_command, task.repository.test_command)
             if command
         ]
-        if not commands:
-            commands = ["pytest -q"]
         return ValidationPlan(
             commands_to_run=commands,
-            checks_skipped=[],
-            rationale="Preserved configured repository validation for agents without validation-plan support.",
+            checks_skipped=(
+                []
+                if commands
+                else [
+                    {
+                        "command_or_check": "automated validation",
+                        "reason": "The agent supplied no plan and the repository has no configured validation command.",
+                    }
+                ]
+            ),
+            rationale=(
+                "Preserved configured repository validation for agents without validation-plan support."
+                if commands
+                else "No automated command was manufactured without repository evidence."
+            ),
             relevant_test_files=[],
-            validation_scope="full",
+            validation_scope="full" if commands else "none",
             confidence="medium",
         )
 

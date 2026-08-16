@@ -116,6 +116,14 @@ class CodingAgent(Protocol):
     async def analyze(self, context: AgentTaskContext) -> AgentAnalysis: ...
     async def implement(self, context: AgentTaskContext) -> AgentExecutionResult: ...
     async def continue_task(self, session_id: str, decision: HumanDecision) -> AgentExecutionResult: ...
+    async def repair_validation(
+        self,
+        session_id: str,
+        *,
+        command: str,
+        failure_classification: str,
+        output_summary: str,
+    ) -> AgentExecutionResult: ...
     async def review(self, context: AgentTaskContext) -> AgentReviewResult: ...
 
 
@@ -151,6 +159,21 @@ class FakeCodingAgent:
         if decision.option.lower() in {"abort", "reject"}:
             return AgentExecutionResult(status="blocked", session_id=session_id, summary="Maintainer stopped execution", checkpoint={"phase": "stopped"})
         return AgentExecutionResult(status="completed", session_id=session_id, summary=f"Resumed with option {decision.option}", checkpoint={"phase": "resumed", "selected_option": decision.option})
+
+    async def repair_validation(
+        self,
+        session_id: str,
+        *,
+        command: str,
+        failure_classification: str,
+        output_summary: str,
+    ) -> AgentExecutionResult:
+        return AgentExecutionResult(
+            status="failed",
+            session_id=session_id,
+            summary="The fake agent cannot repair validation failures.",
+            error=failure_classification,
+        )
 
     async def review(self, context: AgentTaskContext) -> AgentReviewResult:
         return AgentReviewResult(status="completed", session_id=f"fake-{context.task_id}", summary="Review completed", findings=[])
