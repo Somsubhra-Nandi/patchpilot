@@ -79,7 +79,11 @@ class CodexCodingAgent:
         workspace = self._sessions.get(session_id)
         if not workspace:
             raise CodexAgentError("Codex session workspace is unavailable; use persisted checkpoint continuation")
-        prompt = f"PatchPilot resolved the pending decision. Selected option: {decision.option}. Maintainer note: {decision.note or 'none'}. Continue the task in the existing workspace and return the required JSON result."
+        prompt = f"""PatchPilot resolved the pending decision.
+Selected option: {decision.option}
+Maintainer note: {decision.note or 'none'}
+
+Implement the selected option now in the existing workspace. Modify the required source, test, and documentation files; do not merely restate the proposal or decision. Do not push, merge, or modify protected or unrelated files. Do not execute validation commands yourself. Inspect the final git diff, then return the required JSON result with changed_files matching the actual workspace diff and an evidence-backed validation_plan. If the selected option cannot be implemented, return a blocked or failed result with a concrete reason instead of reporting completion with no changes."""
         return AgentExecutionResult.model_validate(await self._execute_resume(session_id, workspace, prompt))
 
     async def repair_validation(

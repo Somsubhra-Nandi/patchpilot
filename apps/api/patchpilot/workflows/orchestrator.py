@@ -43,6 +43,15 @@ class WorkflowError(ValueError):
     pass
 
 
+def _has_publish_authorization(task: AgentTask) -> bool:
+    if task.approvals:
+        return all(approval.status == ApprovalStatus.APPROVED for approval in task.approvals)
+    return bool(task.decisions) and all(
+        decision.status == "resolved" and decision.resolution and decision.resolved_by
+        for decision in task.decisions
+    )
+
+
 class WorkflowOrchestrator:
     def __init__(
         self,
@@ -430,6 +439,18 @@ class WorkflowOrchestrator:
         if self.coding_agent.provider == "codex":
             changed_files = await self.workspaces.changed_files(Path(task.workspace_path or ""))
             diff_lines, diff_summary = await self.workspaces.diff_summary(Path(task.workspace_path or ""))
+            if not changed_files:
+                task.workspace_status = "retained"
+                task.failure_reason = "Codex completed without creating a repository diff"
+                self.state.transition(
+                    task,
+                    status=TaskStatus.FAILED,
+                    stage=WorkflowStage.CHANGES_GENERATED,
+                    summary="Workflow stopped because Codex produced no changes",
+                    details={"changed_files": [], "simulated": False},
+                    actor="codex",
+                )
+                return
         else:
             changed_files = [path for path in plan.get("relevant_files", ["README.md"]) if not path.lower().endswith(("package-lock.json", "pnpm-lock.yaml", "yarn.lock"))][:3]
             diff_lines, diff_summary = 0, "Deterministic demo proposal"
@@ -567,7 +588,7 @@ class WorkflowOrchestrator:
             try:
                 if self.coding_agent.provider != "codex" or not task.workspace_path:
                     raise WorkspaceError("Real publishing requires the isolated Codex task workspace")
-                if not task.approvals or any(approval.status != ApprovalStatus.APPROVED for approval in task.approvals):
+                if not _has_publish_authorization(task):
                     raise WorkspaceError("All required approvals must be completed before publishing")
                 if any(decision.status == "pending" for decision in task.decisions):
                     raise WorkspaceError("All required decisions must be resolved before publishing")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select
@@ -8,7 +9,13 @@ from sqlalchemy import select
 from patchpilot.agents.coding import AgentExecutionResult, AgentReviewResult, ValidationPlan
 from patchpilot.core.config import Settings
 from patchpilot.github.client import GitHubError
-from patchpilot.models import AgentTask, Approval, ProcessedInboundMessage, Repository
+from patchpilot.models import (
+    AgentTask,
+    Approval,
+    ProcessedInboundMessage,
+    Repository,
+)
+from patchpilot.models import DecisionRequest as DecisionModel
 from patchpilot.models.enums import ApprovalStatus, TaskStatus, WorkflowStage
 from patchpilot.schemas.domain import DecisionRequest, InboundMessage, TaskCreate
 from patchpilot.services.commands import CommandService
@@ -62,6 +69,15 @@ class PublishingAgent:
 
     async def review(self, context):
         return AgentReviewResult(status="completed", session_id="thread-publish", summary="Review complete")
+
+
+class NoOpPublishingAgent(PublishingAgent):
+    async def implement(self, context):
+        return AgentExecutionResult(
+            status="completed",
+            session_id="thread-no-op",
+            summary="Completed without changes",
+        )
 
 
 class FailingDraftGitHub(FakeGitHub):
@@ -208,6 +224,72 @@ async def test_write_mode_publishes_real_diff_and_persists_draft_pr(db, tmp_path
     db.expire(task, ["events"])
     event_types = {event.event_type for event in task.events}
     assert {"git.branch_created", "git.commit_created", "git.push_succeeded", "pull_request.created"} <= event_types
+
+
+@pytest.mark.asyncio
+async def test_resolved_product_decision_authorizes_draft_pr_without_separate_approval(
+    db, tmp_path
+):
+    task, remote, settings = publishing_task(db, tmp_path)
+    db.delete(task.approvals[0])
+    db.add(
+        DecisionModel(
+            task_id=task.id,
+            decision_type="product_behavior",
+            title="Choose overflow behavior",
+            context={},
+            risk_level="medium",
+            options=[{"id": "first_n", "label": "Keep first N"}],
+            recommended_option="first_n",
+            requested_by_agent="codex",
+            status="resolved",
+            resolved_at=datetime.now(UTC),
+            resolved_by="maya",
+            resolved_channel="web",
+            resolution="first_n",
+        )
+    )
+    db.commit()
+    github = FakeGitHub()
+    workflow = WorkflowOrchestrator(
+        db,
+        github=github,
+        settings=settings,
+        coding_agent=PublishingAgent(),
+    )
+    info = await workflow.workspaces.prepare(task.id, str(remote), "main")
+    task.workspace_path = str(info.path)
+    task.source_commit_sha = info.source_sha
+    db.commit()
+
+    await workflow.implement(task)
+
+    assert task.status == "completed"
+    assert task.publishing_status == "published"
+    assert task.pull_request_url == "https://github.com/octo/demo/pull/9"
+    assert github.writes
+
+
+@pytest.mark.asyncio
+async def test_completed_codex_run_without_diff_stops_before_publication(db, tmp_path):
+    task, remote, settings = publishing_task(db, tmp_path)
+    github = FakeGitHub()
+    workflow = WorkflowOrchestrator(
+        db,
+        github=github,
+        settings=settings,
+        coding_agent=NoOpPublishingAgent(),
+    )
+    info = await workflow.workspaces.prepare(task.id, str(remote), "main")
+    task.workspace_path = str(info.path)
+    task.source_commit_sha = info.source_sha
+    db.commit()
+
+    await workflow.implement(task)
+
+    assert task.status == "failed"
+    assert task.failure_reason == "Codex completed without creating a repository diff"
+    assert github.writes == []
 
 
 @pytest.mark.asyncio

@@ -57,8 +57,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <Link href="/settings/channels" className="nav-link"><Settings2 size={17} /> Settings</Link>
         </nav>
         <div className="sidebar-foot">
-          <strong><span className="live-dot" />Safe demo mode</strong>
-          <p>GitHub writes are locked. Every proposed change requires approval.</p>
+          <strong><span className="live-dot" />Approval-gated workflow</strong>
+          <p>Draft PRs require explicit maintainer authorization. PatchPilot never auto-merges.</p>
         </div>
       </aside>
       <main className="main">

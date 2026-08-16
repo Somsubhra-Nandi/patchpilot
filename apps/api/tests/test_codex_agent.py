@@ -96,12 +96,14 @@ async def test_codex_analysis_mapping_and_command(tmp_path):
 async def test_codex_decision_and_same_session_resume(tmp_path):
     workspace = tmp_path / "repo"
     (workspace / ".git").mkdir(parents=True)
+    calls = []
     outputs = [
         event_stream({"status": "decision_required", "session_id": "ignored", "summary": "Need strategy", "decision": {"decision_type": "implementation_strategy", "title": "Choose strategy", "risk_level": "medium", "options": [{"id": "B", "label": "Adapter"}], "recommended_option": "B"}}),
         event_stream({"status": "completed", "session_id": "ignored", "summary": "Resumed", "changed_files": ["src/parser.py"]}, "thread-123"),
     ]
 
     async def runner(argv, cwd, timeout):
+        calls.append((argv, cwd, timeout))
         return 0, outputs.pop(0)
 
     agent = CodexCodingAgent(runner=runner)
@@ -110,6 +112,8 @@ async def test_codex_decision_and_same_session_resume(tmp_path):
     resumed = await agent.continue_task(analysis.session_id, HumanDecision(option="B", actor="maya", channel="telegram"))
     assert resumed.status == "completed"
     assert resumed.session_id == analysis.session_id
+    assert "Implement the selected option now" in calls[1][0][-1]
+    assert "changed_files matching the actual workspace diff" in calls[1][0][-1]
 
 
 @pytest.mark.asyncio
