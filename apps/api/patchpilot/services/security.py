@@ -15,6 +15,7 @@ ALLOWED_EXECUTABLES = {
     "make",
     "cargo",
     "go",
+    "rg",
 }
 
 
@@ -35,10 +36,18 @@ def ensure_paths_allowed(paths: list[str], protected_paths: list[str]) -> None:
 
 
 def parse_validation_command(command: str) -> list[str]:
-    if any(token in command for token in ("&&", "||", ";", "|", ">", "<", "`", "$(")):
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>`")
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+    control_tokens = {"&", "&&", "|", "||", ";", ">", ">>", "<", "<<", "`"}
+    if any(token in control_tokens for token in tokens):
         raise ValueError("Shell control operators are not permitted in validation commands")
-    argv = shlex.split(command, posix=True)
+    if "$(" in command:
+        raise ValueError("Shell control operators are not permitted in validation commands")
+    argv = tokens
     if argv and argv[0] == "git":
+        if argv == ["git", "status", "--short"]:
+            return argv
         if len(argv) < 4 or argv[1:4] != ["diff", "--check", "--"]:
             raise ValueError("Only git diff --check with explicit paths is permitted")
         ensure_paths_allowed(argv[4:], [])
