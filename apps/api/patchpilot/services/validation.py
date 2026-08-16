@@ -196,6 +196,19 @@ def _target_reason(argv: list[str], evidence: RepositoryEvidence) -> str | None:
     if not evidence.root:
         return None
     root = evidence.root
+    if reason := _unittest_target_reason(argv, root):
+        return reason
+    is_pytest = argv[0] == "pytest" or (
+        len(argv) >= 3 and argv[0] in {"python", "python3"} and argv[1:3] == ["-m", "pytest"]
+    )
+    if is_pytest:
+        for target in evidence.test_files:
+            if target and not (root / target).exists():
+                return f"proposed relevant test file does not exist: {target}"
+    return None
+
+
+def _unittest_target_reason(argv: list[str], root: Path) -> str | None:
     if (
         len(argv) >= 3
         and argv[:3] in (["python", "-m", "unittest"], ["python3", "-m", "unittest"])
@@ -207,14 +220,6 @@ def _target_reason(argv: list[str], evidence: RepositoryEvidence) -> str | None:
         target = argv[index]
         if not (root / target).is_dir():
             return f"unittest discovery start directory does not exist: {target}"
-
-    is_pytest = argv[0] == "pytest" or (
-        len(argv) >= 3 and argv[0] in {"python", "python3"} and argv[1:3] == ["-m", "pytest"]
-    )
-    if is_pytest:
-        for target in evidence.test_files:
-            if target and not (root / target).exists():
-                return f"proposed relevant test file does not exist: {target}"
     return None
 
 
@@ -399,7 +404,12 @@ def review_validation_plan(
 
 
 def classify_validation_failure(
-    *, exit_code: int, output: str, executable_missing: bool = False
+    *,
+    exit_code: int,
+    output: str,
+    executable_missing: bool = False,
+    argv: list[str] | None = None,
+    workspace: Path | None = None,
 ) -> ValidationFailureType:
     normalized = output.lower()
     if executable_missing or exit_code == 127:
@@ -409,6 +419,8 @@ def classify_validation_failure(
         for text in ("timed out", "temporary failure", "connection reset", "resource unavailable")
     ):
         return "infrastructure_error"
+    if argv and workspace and _unittest_target_reason(argv, workspace.resolve()):
+        return "invalid_test_target"
     if any(
         text in normalized
         for text in (

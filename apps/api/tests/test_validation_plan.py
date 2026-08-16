@@ -161,3 +161,15 @@ def test_docs_only_change_rejects_manufactured_pytest_and_stays_valid(tmp_path):
 )
 def test_validation_failure_classification(output, classification):
     assert classify_validation_failure(exit_code=1, output=output) == classification
+
+
+def test_missing_unittest_target_is_classified_without_platform_specific_output(tmp_path):
+    assert (
+        classify_validation_failure(
+            exit_code=1,
+            output="unrecognized unittest discovery error",
+            argv=["python", "-m", "unittest", "discover", "-s", "tests", "-v"],
+            workspace=tmp_path,
+        )
+        == "invalid_test_target"
+    )

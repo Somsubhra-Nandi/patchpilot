@@ -699,6 +699,8 @@ class WorkflowOrchestrator:
                         exit_code=exit_code,
                         output=output_summary,
                         executable_missing=executable_missing,
+                        argv=argv,
+                        workspace=Path(checkout),
                     )
                 )
                 result = {
